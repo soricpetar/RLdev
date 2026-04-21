@@ -79,6 +79,50 @@ class FieldNavEncoder(nn.Module):
         h_vec = self.vector_encoder(vector)
         return self.proj(torch.cat([h_map, h_vec], dim=-1))
 
+class FieldNavCompactEncoder(nn.Module):
+    def __init__(self, obs_size, hidden_size=128, map_channels=5, map_size=64, **kwargs):
+        super().__init__()
+        self.map_channels = int(map_channels)
+        self.map_size = int(map_size)
+        self.map_dim = self.map_channels * self.map_size * self.map_size
+        self.vector_dim = int(obs_size) - self.map_dim
+        if self.vector_dim <= 0:
+            raise ValueError(
+                f"obs_size={obs_size} is too small for a "
+                f"{self.map_channels}x{self.map_size}x{self.map_size} field_nav map"
+            )
+
+        self.map_encoder = nn.Sequential(
+            nn.Conv2d(self.map_channels, 16, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(16, 24, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(24, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.Flatten(),
+            nn.Linear(32 * 4 * 4, hidden_size),
+            nn.ReLU(),
+        )
+        self.vector_encoder = nn.Sequential(
+            nn.Linear(self.vector_dim, 32),
+            nn.ReLU(),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(hidden_size + 32, hidden_size),
+            nn.ReLU(),
+        )
+
+    def forward(self, observations):
+        observations = observations.float().view(observations.shape[0], -1)
+        costmap = observations[:, : self.map_dim].reshape(
+            -1, self.map_channels, self.map_size, self.map_size
+        )
+        vector = observations[:, self.map_dim :]
+        h_map = self.map_encoder(costmap)
+        h_vec = self.vector_encoder(vector)
+        return self.proj(torch.cat([h_map, h_vec], dim=-1))
+
 class DefaultDecoder(nn.Module):
     def __init__(self, nvec, hidden_size=128):
         super().__init__()

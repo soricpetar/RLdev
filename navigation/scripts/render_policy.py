@@ -54,14 +54,38 @@ class PufferPolicyAdapter(torch.nn.Module):
         return logits, values.squeeze(-1)
 
 
+def _infer_puffer_policy(state_dict: dict[str, torch.Tensor]) -> pufferlib.models.Policy:
+    hidden_size = int(state_dict["decoder.value_function.weight"].shape[1])
+    map_linear = state_dict.get("encoder.map_encoder.8.weight")
+
+    if map_linear is None:
+        encoder_cls = pufferlib.models.FieldNavEncoder
+    elif int(map_linear.shape[1]) == 32 * 4 * 4:
+        encoder_cls = pufferlib.models.FieldNavCompactEncoder
+    else:
+        encoder_cls = pufferlib.models.FieldNavEncoder
+
+    first_network = state_dict.get("network.net.0.weight")
+    num_layers = 1
+    if first_network is not None:
+        layer_indices = {
+            int(key.split(".")[2])
+            for key in state_dict
+            if key.startswith("network.net.") and key.endswith(".weight")
+        }
+        num_layers = max(1, len(layer_indices))
+
+    encoder = encoder_cls(obs_size=20487, hidden_size=hidden_size, map_channels=5, map_size=64)
+    network = pufferlib.models.MLP(hidden_size=hidden_size, num_layers=num_layers)
+    decoder = pufferlib.models.DefaultDecoder([5], hidden_size=hidden_size)
+    return pufferlib.models.Policy(encoder, decoder, network)
+
+
 def load_policy(checkpoint_path: Path) -> torch.nn.Module:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if "model_state_dict" not in checkpoint:
-        encoder = pufferlib.models.FieldNavEncoder(obs_size=20487, hidden_size=256, map_channels=5, map_size=64)
-        network = pufferlib.models.MLP(hidden_size=256, num_layers=2)
-        decoder = pufferlib.models.DefaultDecoder([5], hidden_size=256)
-        policy = pufferlib.models.Policy(encoder, decoder, network)
         state_dict = {key.replace("module.", ""): value for key, value in checkpoint.items()}
+        policy = _infer_puffer_policy(state_dict)
         policy.load_state_dict(state_dict)
         policy.eval()
         return PufferPolicyAdapter(policy)

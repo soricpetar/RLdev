@@ -27,12 +27,15 @@ Training outputs:
 
 `field_nav` is registered as a native Ocean/Puffer environment in
 `config/field_nav.ini` and implemented in `ocean/field_nav`. The Puffer policy
-uses `FieldNavEncoder`: the 5-channel semantic map is encoded with a small
-convolutional stack, then concatenated with the compact goal/state features
-before the actor and value heads.
+uses `FieldNavCompactEncoder`: the 5-channel semantic map is encoded with a
+compact convolutional stack, then concatenated with the compact goal/state
+features before the actor and value heads.
 
 On Apple Silicon, `--device auto` uses MPS when CUDA is not available. You can
 force it with `--device mps` or compare against CPU with `--device cpu`.
+The default config favors higher environment SPS with 32 agents and
+`train.replay_ratio = 1.0`; increase `--train.replay-ratio` if you want more PPO
+optimization passes per collected batch.
 
 ## Notes on dependencies
 

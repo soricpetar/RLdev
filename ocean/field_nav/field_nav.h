@@ -167,6 +167,12 @@ static inline float fn_object_margin(float x, float y, const FieldNavObject* obj
     return fn_distance(x, y, obj->x, obj->y) - obj->radius;
 }
 
+static inline int fn_clamp_int(int x, int lo, int hi) {
+    if (x < lo) return lo;
+    if (x > hi) return hi;
+    return x;
+}
+
 static inline void fn_add_circle(FieldNav* env, int kind, float x, float y, float radius, float vx, float vy) {
     if (env->object_count >= FIELD_NAV_MAX_OBJECTS) return;
     FieldNavObject* obj = &env->objects[env->object_count++];
@@ -256,20 +262,59 @@ static inline void fn_compute_observation(FieldNav* env) {
     float cos_h = cosf(env->heading);
     float sin_h = sinf(env->heading);
 
-    for (int oy = 0; oy < FIELD_NAV_MAP_SIZE; oy++) {
-        float gy = -half + step * (float)oy;
-        for (int ox = 0; ox < FIELD_NAV_MAP_SIZE; ox++) {
-            float gx = -half + step * (float)ox;
-            float wx = env->robot_x + gx * cos_h - gy * sin_h;
-            float wy = env->robot_y + gx * sin_h + gy * cos_h;
-            int cell = oy * FIELD_NAV_MAP_SIZE + ox;
+    for (int i = 0; i < env->object_count; i++) {
+        FieldNavObject* obj = &env->objects[i];
+        float expansion = env->inflation_radius_m + obj->radius;
+        float min_x = obj->x - expansion;
+        float max_x = obj->x + expansion;
+        float min_y = obj->y - expansion;
+        float max_y = obj->y + expansion;
 
-            for (int i = 0; i < env->object_count; i++) {
-                FieldNavObject* obj = &env->objects[i];
+        if (obj->kind == FIELD_NAV_WALL) {
+            expansion = env->inflation_radius_m + 0.5f * obj->radius;
+            min_x = fminf(obj->x, obj->x2) - expansion;
+            max_x = fmaxf(obj->x, obj->x2) + expansion;
+            min_y = fminf(obj->y, obj->y2) - expansion;
+            max_y = fmaxf(obj->y, obj->y2) + expansion;
+        }
+
+        float local_min_x = 1e9f;
+        float local_max_x = -1e9f;
+        float local_min_y = 1e9f;
+        float local_max_y = -1e9f;
+        float corners_x[4] = {min_x, min_x, max_x, max_x};
+        float corners_y[4] = {min_y, max_y, min_y, max_y};
+        for (int c = 0; c < 4; c++) {
+            float dx = corners_x[c] - env->robot_x;
+            float dy = corners_y[c] - env->robot_y;
+            float lx = dx * cos_h + dy * sin_h;
+            float ly = -dx * sin_h + dy * cos_h;
+            if (lx < local_min_x) local_min_x = lx;
+            if (lx > local_max_x) local_max_x = lx;
+            if (ly < local_min_y) local_min_y = ly;
+            if (ly > local_max_y) local_max_y = ly;
+        }
+        if (local_max_x < -half || local_min_x > half || local_max_y < -half || local_min_y > half) {
+            continue;
+        }
+
+        int x0 = fn_clamp_int((int)floorf((local_min_x + half) / step), 0, FIELD_NAV_MAP_SIZE - 1);
+        int x1 = fn_clamp_int((int)ceilf((local_max_x + half) / step), 0, FIELD_NAV_MAP_SIZE - 1);
+        int y0 = fn_clamp_int((int)floorf((local_min_y + half) / step), 0, FIELD_NAV_MAP_SIZE - 1);
+        int y1 = fn_clamp_int((int)ceilf((local_max_y + half) / step), 0, FIELD_NAV_MAP_SIZE - 1);
+        if (x1 < x0 || y1 < y0) continue;
+
+        for (int oy = y0; oy <= y1; oy++) {
+            float gy = -half + step * (float)oy;
+            for (int ox = x0; ox <= x1; ox++) {
+                float gx = -half + step * (float)ox;
+                float wx = env->robot_x + gx * cos_h - gy * sin_h;
+                float wy = env->robot_y + gx * sin_h + gy * cos_h;
                 float margin = fn_object_margin(wx, wy, obj);
                 if (margin >= env->inflation_radius_m) continue;
                 float cost = margin <= 0.0f ? fn_object_cost(obj->kind) : fn_object_cost(obj->kind) * (1.0f - margin / env->inflation_radius_m);
                 cost = fn_clip(cost, 0.0f, 1.0f);
+                int cell = oy * FIELD_NAV_MAP_SIZE + ox;
                 int offset = obj->kind * map_cells + cell;
                 if (cost > obs[offset]) obs[offset] = cost;
             }

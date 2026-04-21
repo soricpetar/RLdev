@@ -23,8 +23,9 @@ import pufferlib.emulation
 class TrainConfig:
     seed: int = 0
     num_envs: int = 16
-    rollout_steps: int = 128
-    updates: int = 80
+    rollout_steps: int = 192
+    updates: int = 160
+    max_steps: int = 400
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
@@ -54,25 +55,116 @@ class ActorCritic(nn.Module):
         return self.pi(h), self.v(h).squeeze(-1)
 
 
-def make_env(seed: int):
-    return pufferlib.emulation.GymnasiumPufferEnv(FieldNavEnv(max_steps=300)).env
+class SemanticCNNActorCritic(nn.Module):
+    def __init__(
+        self,
+        obs_dim: int,
+        act_dim: int,
+        map_channels: int = 5,
+        map_size: int = 64,
+        hidden: int = 256,
+    ):
+        super().__init__()
+        self.obs_dim = obs_dim
+        self.map_channels = map_channels
+        self.map_size = map_size
+        self.map_dim = map_channels * map_size * map_size
+        self.vector_dim = obs_dim - self.map_dim
+        if self.vector_dim <= 0:
+            raise ValueError(
+                f"obs_dim={obs_dim} is too small for a {map_channels}x{map_size}x{map_size} map"
+            )
+
+        self.map_encoder = nn.Sequential(
+            nn.Conv2d(map_channels, 16, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((8, 8)),
+            nn.Flatten(),
+            nn.Linear(64 * 8 * 8, hidden),
+            nn.ReLU(),
+        )
+        self.vector_encoder = nn.Sequential(
+            nn.Linear(self.vector_dim, 64),
+            nn.ReLU(),
+        )
+        self.net = nn.Sequential(
+            nn.Linear(hidden + 64, hidden),
+            nn.ReLU(),
+            nn.Linear(hidden, hidden),
+            nn.ReLU(),
+        )
+        self.pi = nn.Linear(hidden, act_dim)
+        self.v = nn.Linear(hidden, 1)
+
+    def forward(self, obs: torch.Tensor):
+        costmap = obs[:, : self.map_dim].reshape(-1, self.map_channels, self.map_size, self.map_size)
+        vector = obs[:, self.map_dim :]
+        h_map = self.map_encoder(costmap)
+        h_vec = self.vector_encoder(vector)
+        h = self.net(torch.cat([h_map, h_vec], dim=-1))
+        return self.pi(h), self.v(h).squeeze(-1)
+
+
+def make_model(
+    architecture: str,
+    obs_dim: int,
+    act_dim: int,
+    map_channels: int = 5,
+    map_size: int = 64,
+) -> nn.Module:
+    if architecture == "mlp":
+        return ActorCritic(obs_dim, act_dim)
+    if architecture == "cnn":
+        return SemanticCNNActorCritic(obs_dim, act_dim, map_channels=map_channels, map_size=map_size)
+    raise ValueError(f"Unknown policy architecture: {architecture}")
+
+
+def resolve_device(device_name: str) -> torch.device:
+    if device_name == "auto":
+        if torch.cuda.is_available():
+            return torch.device("cuda")
+        if torch.backends.mps.is_available():
+            return torch.device("mps")
+        return torch.device("cpu")
+    if device_name == "cuda" and not torch.cuda.is_available():
+        raise RuntimeError("CUDA was requested, but torch.cuda.is_available() is false")
+    if device_name == "mps" and not torch.backends.mps.is_available():
+        raise RuntimeError("MPS was requested, but torch.backends.mps.is_available() is false")
+    return torch.device(device_name)
+
+
+def make_env(seed: int, max_steps: int):
+    return pufferlib.emulation.GymnasiumPufferEnv(FieldNavEnv(max_steps=max_steps)).env
 
 
 def main():
     parser = argparse.ArgumentParser(description="Train PPO policy for FieldNavEnv")
-    parser.add_argument("--updates", type=int, default=80)
+    parser.add_argument("--updates", type=int, default=TrainConfig.updates)
     parser.add_argument("--num-envs", type=int, default=16)
-    parser.add_argument("--rollout-steps", type=int, default=128)
+    parser.add_argument("--rollout-steps", type=int, default=TrainConfig.rollout_steps)
+    parser.add_argument("--max-steps", type=int, default=TrainConfig.max_steps)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--out", type=str, default="navigation/artifacts/fieldnav_policy.pt")
+    parser.add_argument("--architecture", choices=("cnn", "mlp"), default="cnn")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda", "mps"), default="auto")
     args = parser.parse_args()
 
-    cfg = TrainConfig(seed=args.seed, num_envs=args.num_envs, rollout_steps=args.rollout_steps, updates=args.updates)
+    cfg = TrainConfig(
+        seed=args.seed,
+        num_envs=args.num_envs,
+        rollout_steps=args.rollout_steps,
+        updates=args.updates,
+        max_steps=args.max_steps,
+    )
 
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
-    envs = [make_env(cfg.seed + i) for i in range(cfg.num_envs)]
+    envs = [make_env(cfg.seed + i, cfg.max_steps) for i in range(cfg.num_envs)]
     wrapped = [pufferlib.emulation.GymnasiumPufferEnv(e) for e in envs]
 
     obs_list = []
@@ -81,11 +173,14 @@ def main():
         obs_list.append(obs)
     obs = np.stack(obs_list)
 
-    obs_dim = obs.shape[1]
-    act_dim = wrapped[0].action_space.n
+    obs_dim = int(obs.shape[1])
+    act_dim = int(wrapped[0].action_space.n)
+    map_channels = int(wrapped[0].observation_space["costmap"].shape[0])
+    map_size = int(wrapped[0].observation_space["costmap"].shape[1])
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = ActorCritic(obs_dim, act_dim).to(device)
+    device = resolve_device(args.device)
+    print(f"device={device}")
+    model = make_model(args.architecture, obs_dim, act_dim, map_channels=map_channels, map_size=map_size).to(device)
     optimizer = optim.Adam(model.parameters(), lr=cfg.lr)
 
     episodic_returns = np.zeros(cfg.num_envs, dtype=np.float32)
@@ -199,6 +294,10 @@ def main():
             "config": cfg.__dict__,
             "obs_dim": obs_dim,
             "act_dim": act_dim,
+            "architecture": args.architecture,
+            "map_channels": map_channels,
+            "map_size": map_size,
+            "vector_dim": int(obs_dim - map_channels * map_size * map_size),
             "avg_return_50": float(np.mean(finished_returns[-50:])) if finished_returns else 0.0,
         },
         out_path,
@@ -209,6 +308,12 @@ def main():
         "updates": cfg.updates,
         "num_envs": cfg.num_envs,
         "rollout_steps": cfg.rollout_steps,
+        "max_steps": cfg.max_steps,
+        "architecture": args.architecture,
+        "obs_dim": obs_dim,
+        "act_dim": act_dim,
+        "map_channels": map_channels,
+        "map_size": map_size,
         "episodes_finished": len(finished_returns),
         "avg_return_50": float(np.mean(finished_returns[-50:])) if finished_returns else 0.0,
         "best_return": float(np.max(finished_returns)) if finished_returns else 0.0,

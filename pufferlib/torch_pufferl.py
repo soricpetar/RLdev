@@ -99,6 +99,22 @@ _TORCH_TO_CTYPE = {
     torch.float32: ctypes.c_float,
 }
 
+
+def resolve_device(args, gpu):
+    requested = args.get('device', 'auto')
+    if requested == 'auto':
+        if gpu:
+            return 'cuda'
+        if torch.backends.mps.is_available():
+            return 'mps'
+        return 'cpu'
+    if requested == 'cuda' and not torch.cuda.is_available():
+        raise RuntimeError('CUDA was requested, but torch.cuda.is_available() is false')
+    if requested == 'mps' and not torch.backends.mps.is_available():
+        raise RuntimeError('MPS was requested, but torch.backends.mps.is_available() is false')
+    return requested
+
+
 def _cpu_tensor(ptr, shape, dtype):
     '''Zero-copy CPU tensor from a raw pointer via ctypes.'''
     ctype = _TORCH_TO_CTYPE[dtype]
@@ -111,7 +127,7 @@ def _cpu_tensor(ptr, shape, dtype):
 class PuffeRL:
     def __init__(self, args, vec, policy, verbose=True):
         config = args['train']
-        device = 'cuda' if _C.gpu else 'cpu'
+        device = resolve_device(args, bool(getattr(vec, 'gpu', 0)))
         self.device = device
 
         torch.set_float32_matmul_precision('high')
@@ -233,6 +249,7 @@ class PuffeRL:
                 self._vec.gpu_step(actions_flat.data_ptr())
                 torch.cuda.synchronize()
             else:
+                actions_flat = actions_flat.cpu()
                 self._vec.cpu_step(actions_flat.data_ptr())
 
             o, r, d = self.vec_obs, self.vec_rewards, self.vec_terminals
@@ -410,7 +427,16 @@ class PuffeRL:
             os.environ['CUDA_VISIBLE_DEVICES'] = str(local_rank)
 
         args['vec']['num_buffers'] = 1
-        vec = _C.create_vec(args, _C.gpu)
+        if args.get('backend') == 'python':
+            if args['env_name'] not in ('field_nav', 'fieldnav', 'field-nav'):
+                raise ValueError(f'No Python Puffer env registered for {args["env_name"]}')
+            repo_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+            if repo_dir not in os.sys.path:
+                os.sys.path.insert(0, repo_dir)
+            from navigation.puffer_env import create_vec
+            vec = create_vec(args)
+        else:
+            vec = _C.create_vec(args, _C.gpu)
         policy = load_policy(args, vec)
 
         if 'LOCAL_RANK' in os.environ:
@@ -429,7 +455,22 @@ class PuffeRL:
 def compute_puff_advantage(values, rewards, terminals,
         ratio, advantages, gamma, gae_lambda, vtrace_rho_clip, vtrace_c_clip):
     num_steps, horizon = values.shape
-    fn = _C.puff_advantage if values.is_cuda else _C.puff_advantage_cpu
+    if values.is_cuda:
+        fn = _C.puff_advantage
+    elif values.device.type == 'cpu':
+        fn = _C.puff_advantage_cpu
+    else:
+        lastpufferlam = torch.zeros(num_steps, device=values.device)
+        for t in range(horizon - 2, -1, -1):
+            nextnonterminal = 1.0 - terminals[:, t + 1]
+            importance = ratio[:, t]
+            rho_t = torch.clamp(importance, max=vtrace_rho_clip)
+            c_t = torch.clamp(importance, max=vtrace_c_clip)
+            delta = rho_t * rewards[:, t + 1] + gamma * values[:, t + 1] * nextnonterminal - values[:, t]
+            lastpufferlam = delta + gamma * gae_lambda * c_t * lastpufferlam * nextnonterminal
+            advantages[:, t] = lastpufferlam
+        return advantages
+
     fn(
         values.data_ptr(), rewards.data_ptr(), terminals.data_ptr(),
         ratio.data_ptr(), advantages.data_ptr(),
@@ -475,11 +516,12 @@ def load_policy(args, vec):
     decoder_cls = getattr(pufferlib.models, args['torch']['decoder'])
 
     network = network_cls(**policy_kwargs)
-    encoder = encoder_cls(vec.obs_size, policy_kwargs['hidden_size'])
+    encoder_kwargs = {k: v for k, v in policy_kwargs.items() if k != 'hidden_size'}
+    encoder = encoder_cls(vec.obs_size, policy_kwargs['hidden_size'], **encoder_kwargs)
     decoder = decoder_cls(vec.act_sizes, policy_kwargs['hidden_size'])
     policy = pufferlib.models.Policy(encoder, decoder, network)
 
-    device = 'cuda' if _C.gpu else 'cpu'
+    device = resolve_device(args, bool(getattr(vec, 'gpu', 0)))
     policy = policy.to(device)
 
     load_id = args['load_id']
@@ -508,4 +550,3 @@ def load_policy(args, vec):
         policy.load_state_dict(state_dict)
 
     return policy
-

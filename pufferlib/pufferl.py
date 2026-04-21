@@ -22,8 +22,9 @@ import torch
 import pufferlib
 try:
     from pufferlib import _C
-except ImportError:
-    raise ImportError('Failed to import PufferLib C++ backend. If you have non-default PyTorch, try installing with --no-build-isolation')
+except ImportError as e:
+    _C = None
+    _C_IMPORT_ERROR = e
 
 import rich
 import rich.traceback
@@ -33,6 +34,14 @@ rich.traceback.install(show_locals=False)
 
 import signal # Aggressively exit on ctrl+c
 signal.signal(signal.SIGINT, lambda sig, frame: os._exit(0))
+
+def _require_backend():
+    if _C is None:
+        raise ImportError(
+            'Failed to import PufferLib C++ backend. If you have non-default PyTorch, '
+            'try installing with --no-build-isolation'
+        ) from _C_IMPORT_ERROR
+    return _C
 
 def unroll_nested_dict(d):
     if not isinstance(d, dict):
@@ -157,6 +166,12 @@ def print_dashboard(args, model_size, flat_logs, clear=False, idx=[0],
 
     print('\033[0;0H' + capture.get())
 
+def write_json_atomic(path, payload):
+    tmp_path = path + '.tmp'
+    with open(tmp_path, 'w') as f:
+        json.dump(payload, f)
+    os.replace(tmp_path, path)
+
 def validate_config(args):
     minibatch_size = args['train']['minibatch_size']
     horizon = args['train']['horizon']
@@ -167,13 +182,21 @@ def validate_config(args):
         f'minibatch_size {minibatch_size} > total_agents {total_agents} * horizon {horizon}'
 
 def _resolve_backend(args):
-    compiled_env = getattr(_C, 'env_name', None)
+    if args.get('backend') == 'python':
+        from pufferlib.torch_pufferl import PuffeRL
+        return PuffeRL
+
+    backend = _require_backend()
+    compiled_env = getattr(backend, 'env_name', None)
     assert compiled_env is None or compiled_env == args['env_name'], \
         f'build.sh was run for {compiled_env}, not {args["env_name"]}'
+    if args.get('backend') == 'native' and (args.get('slowly') or not hasattr(backend, 'create_pufferl')):
+        from pufferlib.torch_pufferl import PuffeRL
+        return PuffeRL
     if args.get('slowly'):
         from pufferlib.torch_pufferl import PuffeRL
         return PuffeRL
-    return _C
+    return backend
 
 def _train_worker(args):
     backend = _resolve_backend(args)
@@ -208,6 +231,38 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
     log_dir = os.path.join(args['log_dir'], args['env_name'])
     os.makedirs(log_dir, exist_ok=True)
+    live_log_path = os.path.join(log_dir, run_id + '.live.json')
+    latest_log_path = os.path.join(log_dir, 'latest.live.json')
+    live_history = []
+    model_path = ''
+    flat_logs = {}
+
+    def write_live_log(stage, flat_logs=None, checkpoint_path=None):
+        flat_logs = dict(flat_logs or {})
+        if flat_logs:
+            live_history.append(flat_logs)
+            del live_history[:-5000]
+
+        payload = {
+            'run_id': run_id,
+            'env_name': args['env_name'],
+            'stage': stage,
+            'updated_at': time.time(),
+            'checkpoint_path': checkpoint_path or model_path,
+            'checkpoint_dir': checkpoint_dir,
+            'log_dir': log_dir,
+            'config': {
+                'device': args.get('device'),
+                'backend': args.get('backend'),
+                'total_timesteps': args['train']['total_timesteps'],
+                'total_agents': args['vec']['total_agents'],
+                'horizon': args['train']['horizon'],
+            },
+            'latest': flat_logs,
+            'history': live_history,
+        }
+        write_json_atomic(live_log_path, payload)
+        write_json_atomic(latest_log_path, payload)
 
     try:
         pufferl = backend.create_pufferl(args)
@@ -218,15 +273,14 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
         return
 
     args.pop('nccl_id', None)
+    write_live_log('started', flat_logs)
     model_size = pufferl.num_params()
     if verbose:
         flat_logs = dict(unroll_nested_dict(backend.log(pufferl)))
         print_dashboard(args, model_size, flat_logs, clear=True)
 
-    model_path = ''
-    flat_logs = {}
     train_epochs = int(total_timesteps // (args['vec']['total_agents'] * args['train']['horizon']))
-    eval_epochs = train_epochs // 2
+    eval_epochs = 0 if args['eval_episodes'] <= 0 else train_epochs // 2
     for epoch in range(train_epochs + eval_epochs):
         backend.rollouts(pufferl)
 
@@ -246,6 +300,7 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
         if verbose:
             print_dashboard(args, model_size, flat_logs)
+        write_live_log('evaluating' if epoch >= train_epochs else 'training', flat_logs, model_path)
 
         if target_key not in flat_logs:
             continue
@@ -265,6 +320,7 @@ def _train(env_name, args, sweep_obj=None, result_queue=None, verbose=False):
 
 
     print_dashboard(args, model_size, flat_logs)
+    write_live_log('finished', flat_logs, model_path)
     backend.close(pufferl)
 
     if target_key not in flat_logs:
@@ -320,7 +376,7 @@ def train(env_name, args=None, gpus=None, **kwargs):
     gpus = list(gpus or range(args['train']['gpus']))
     args['train']['total_timesteps'] //= len(gpus)
     args['world_size'] = len(gpus)
-    args['nccl_id'] = _C.get_nccl_id() if len(gpus) > 1 else b''
+    args['nccl_id'] = _require_backend().get_nccl_id() if len(gpus) > 1 else b''
 
     if not subprocess:
         gpus = gpus[-1:] + gpus[:-1]  # Main process gets rank 0

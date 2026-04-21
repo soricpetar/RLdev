@@ -34,7 +34,8 @@ def main():
         print(
             f"episode={ep} total_reward={total_reward:.3f} "
             f"steps={info['steps']} goal_distance={info['goal_distance']:.2f} "
-            f"goal_reached={info['goal_reached']} collision={info['collision']}"
+            f"goal_reached={info['goal_reached']} collision={info['collision']} "
+            f"objects={info.get('object_counts', {})}"
         )
 
 

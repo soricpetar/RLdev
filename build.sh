@@ -68,13 +68,15 @@ fi
 
 CLANG_WARN=(
     -Wall
-    -ferror-limit=3
     -Werror=incompatible-pointer-types
     -Werror=return-type
-    -Wno-error=incompatible-pointer-types-discards-qualifiers
-    -Wno-incompatible-pointer-types-discards-qualifiers
     -Wno-error=array-parameter
 )
+if ${CC:-clang} --version 2>/dev/null | grep -qi clang; then
+    CLANG_WARN+=(-ferror-limit=3)
+    CLANG_WARN+=(-Wno-error=incompatible-pointer-types-discards-qualifiers)
+    CLANG_WARN+=(-Wno-incompatible-pointer-types-discards-qualifiers)
+fi
 
 download() {
     local name=$1 url=$2
@@ -220,6 +222,21 @@ PYBIND_INCLUDE=$(python -c "import pybind11; print(pybind11.get_include())")
 NUMPY_INCLUDE=$(python -c "import numpy; print(numpy.get_include())")
 EXT_SUFFIX=$(python -c "import sysconfig; print(sysconfig.get_config_var('EXT_SUFFIX'))")
 OUTPUT="pufferlib/_C${EXT_SUFFIX}"
+EXTRA_SHARED_LINK=()
+TORCH_OMP_ID=""
+if [ "$PLATFORM" != "Linux" ]; then
+    TORCH_LIB_DIR=$(python -c "import torch, os; print(os.path.join(os.path.dirname(torch.__file__), 'lib'))" 2>/dev/null || echo "")
+    if [ -n "$TORCH_LIB_DIR" ] && [ -f "$TORCH_LIB_DIR/libomp.dylib" ]; then
+        TORCH_OMP_ID=$(otool -D "$TORCH_LIB_DIR/libomp.dylib" 2>/dev/null | tail -n 1 || echo "")
+        EXTRA_SHARED_LINK+=("-Wl,-rpath,$TORCH_LIB_DIR")
+    fi
+fi
+
+fix_macos_openmp() {
+    if [ "$PLATFORM" != "Linux" ] && [ -n "$TORCH_OMP_ID" ]; then
+        install_name_tool -change /opt/homebrew/opt/llvm/lib/libomp.dylib "$TORCH_OMP_ID" "$OUTPUT" 2>/dev/null || true
+    fi
+}
 
 BINDING_SRC="$SRC_DIR/binding.c"
 mkdir -p build
@@ -269,11 +286,13 @@ if [ -z "$MODE" ]; then
         build/bindings.o "$STATIC_LIB" "$RAYLIB_A"
         -L$CUDA_HOME/lib64 $CUDNN_LFLAG $NCCL_LFLAG
         -lcudart -lnccl -lnvidia-ml -lcublas -lcusolver -lcurand -lcudnn
-        $OMP_LIB $LINK_OPT
+        "$OMP_LIB" $LINK_OPT
+        "${EXTRA_SHARED_LINK[@]}"
         "${SHARED_LDFLAGS[@]}"
         -o "$OUTPUT"
     )
     "${LINK_CMD[@]}"
+    fix_macos_openmp
     echo "Built: $OUTPUT"
 
 elif [ "$MODE" = "cpu" ]; then
@@ -283,7 +302,7 @@ elif [ "$MODE" = "cpu" ]; then
         -DPLATFORM_DESKTOP \
         -std=c++17 \
         -I. -Isrc \
-        -I$PYTHON_INCLUDE -I$PYBIND_INCLUDE \
+        "-I$PYTHON_INCLUDE" "-I$PYBIND_INCLUDE" \
         -DOBS_TENSOR_T=$OBS_TENSOR_T \
         -DENV_NAME=$ENV \
         $PRECISION $LINK_OPT \
@@ -291,11 +310,13 @@ elif [ "$MODE" = "cpu" ]; then
     LINK_CMD=(
         ${CXX:-g++} -shared -fPIC -fopenmp
         build/bindings_cpu.o "$STATIC_LIB" "$RAYLIB_A"
-        -lm -lpthread $OMP_LIB $LINK_OPT
+        -lm -lpthread "$OMP_LIB" $LINK_OPT
+        "${EXTRA_SHARED_LINK[@]}"
         "${SHARED_LDFLAGS[@]}"
         -o "$OUTPUT"
     )
     "${LINK_CMD[@]}"
+    fix_macos_openmp
     echo "Built: $OUTPUT"
 
 elif [ "$MODE" = "profile" ]; then

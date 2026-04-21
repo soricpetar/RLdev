@@ -18,13 +18,23 @@ except ImportError:  # pragma: no cover - fallback for constrained environments
 
     gym = _FallbackGym()  # type: ignore
 
-from .maps import collision_distance, obstacle_costmap, random_obstacles
+from .maps import (
+    collision_distance,
+    move_dynamic_objects,
+    obstacle_costmap,
+    random_field_objects,
+    random_obstacles,
+    semantic_contact_penalty,
+    semantic_costmap,
+    SEMANTIC_CHANNELS,
+)
 from .rewards import RewardConfig, compute_reward
 from .robot import RobotState, step_kinematics, wrap_to_pi
 
 
 class FieldNavEnv(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 10}
+    costmap_channels = SEMANTIC_CHANNELS
 
     def __init__(
         self,
@@ -35,9 +45,19 @@ class FieldNavEnv(gym.Env):
         dt: float = 0.2,
         fixed_speed_mps: float = 1.0,
         max_turn_rate_rps: float = 1.0,
-        num_obstacles_range: tuple[int, int] = (8, 30),
-        goal_tolerance_m: float = 0.8,
+        num_obstacles_range: tuple[int, int] = (14, 40),
+        obstacle_radius_range_m: tuple[float, float] = (0.35, 1.6),
+        tree_rows_range: tuple[int, int] = (2, 4),
+        bushes_range: tuple[int, int] = (6, 14),
+        potholes_range: tuple[int, int] = (4, 10),
+        people_range: tuple[int, int] = (2, 6),
+        walls_range: tuple[int, int] = (1, 4),
+        min_goal_distance_m: float = 10.0,
+        max_goal_distance_m: float = 22.0,
+        goal_tolerance_m: float = 0.65,
         robot_radius_m: float = 0.35,
+        inflation_radius_m: float = 1.0,
+        near_obstacle_threshold_m: float = 2.0,
         render_mode: str | None = None,
     ):
         super().__init__()
@@ -49,8 +69,18 @@ class FieldNavEnv(gym.Env):
         self.fixed_speed_mps = fixed_speed_mps
         self.max_turn_rate_rps = max_turn_rate_rps
         self.num_obstacles_range = num_obstacles_range
+        self.obstacle_radius_range_m = obstacle_radius_range_m
+        self.tree_rows_range = tree_rows_range
+        self.bushes_range = bushes_range
+        self.potholes_range = potholes_range
+        self.people_range = people_range
+        self.walls_range = walls_range
+        self.min_goal_distance_m = min_goal_distance_m
+        self.max_goal_distance_m = max_goal_distance_m
         self.goal_tolerance_m = goal_tolerance_m
         self.robot_radius_m = robot_radius_m
+        self.inflation_radius_m = inflation_radius_m
+        self.near_obstacle_threshold_m = near_obstacle_threshold_m
         self.render_mode = render_mode
 
         self.reward_cfg = RewardConfig()
@@ -61,7 +91,12 @@ class FieldNavEnv(gym.Env):
 
         self.observation_space = spaces.Dict(
             {
-                "costmap": spaces.Box(low=0.0, high=1.0, shape=(map_size, map_size), dtype=np.float32),
+                "costmap": spaces.Box(
+                    low=0.0,
+                    high=1.0,
+                    shape=(len(self.costmap_channels), map_size, map_size),
+                    dtype=np.float32,
+                ),
                 "goal": spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
                 "state": spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
             }
@@ -72,6 +107,7 @@ class FieldNavEnv(gym.Env):
         self.robot = RobotState(0.0, 0.0, 0.0, 0.0, 0.0)
         self.goal_xy = np.zeros(2, dtype=np.float32)
         self.obstacles = []
+        self.object_contact = {"bush": 0.0, "pothole": 0.0, "person": 0.0}
         self._prev_goal_distance = np.inf
 
     def reset(self, *, seed: int | None = None, options: dict | None = None):
@@ -90,12 +126,31 @@ class FieldNavEnv(gym.Env):
             yaw_rate=0.0,
         )
 
-        self.goal_xy = self._sample_goal_far_from_robot(min_dist=6.0, max_dist=18.0)
-
-        nobs = int(self._rng.integers(self.num_obstacles_range[0], self.num_obstacles_range[1] + 1))
-        self.obstacles = random_obstacles(
-            self._rng, nobs, self.world_size_m, min_radius=0.25, max_radius=1.4
+        self.goal_xy = self._sample_goal_far_from_robot(
+            min_dist=self.min_goal_distance_m,
+            max_dist=self.max_goal_distance_m,
         )
+
+        if options and options.get("legacy_obstacles"):
+            nobs = int(self._rng.integers(self.num_obstacles_range[0], self.num_obstacles_range[1] + 1))
+            self.obstacles = random_obstacles(
+                self._rng,
+                nobs,
+                self.world_size_m,
+                min_radius=self.obstacle_radius_range_m[0],
+                max_radius=self.obstacle_radius_range_m[1],
+            )
+        else:
+            self.obstacles = random_field_objects(
+                self._rng,
+                self.world_size_m,
+                tree_rows_range=self.tree_rows_range,
+                bushes_range=self.bushes_range,
+                potholes_range=self.potholes_range,
+                people_range=self.people_range,
+                walls_range=self.walls_range,
+            )
+        self.object_contact = {"bush": 0.0, "pothole": 0.0, "person": 0.0}
 
         self._prev_goal_distance = self._goal_distance()
         obs = self._observation()
@@ -112,6 +167,7 @@ class FieldNavEnv(gym.Env):
             max_turn_rate=self.max_turn_rate_rps,
         )
         self._steps += 1
+        move_dynamic_objects(self.obstacles, self.dt, self.world_size_m)
 
         goal_distance = self._goal_distance()
         progress = self._prev_goal_distance - goal_distance
@@ -121,16 +177,24 @@ class FieldNavEnv(gym.Env):
         collision = nearest_margin <= 0.0
         goal_reached = goal_distance <= self.goal_tolerance_m
         out_of_bounds = self._out_of_bounds()
+        semantic_penalty, object_contact = semantic_contact_penalty(
+            self.robot.x,
+            self.robot.y,
+            self.robot_radius_m,
+            self.obstacles,
+        )
 
         reward = compute_reward(
             progress=progress,
             goal_reached=goal_reached,
             collision=collision,
             nearest_obstacle_distance=nearest_margin,
-            near_distance_threshold=1.5,
+            near_distance_threshold=self.near_obstacle_threshold_m,
             steering_delta=steering - self._prev_steering,
             cfg=self.reward_cfg,
         )
+        reward -= semantic_penalty
+        self.object_contact = object_contact
         self._prev_steering = steering
 
         terminated = bool(collision or goal_reached or out_of_bounds)
@@ -151,7 +215,8 @@ class FieldNavEnv(gym.Env):
         dist = self._goal_distance()
         print(
             f"step={self._steps} pos=({self.robot.x:.2f},{self.robot.y:.2f}) "
-            f"heading={self.robot.heading:.2f} goal_dist={dist:.2f}"
+            f"heading={self.robot.heading:.2f} goal_dist={dist:.2f} "
+            f"contacts={self.object_contact}"
         )
 
     def _goal_distance(self) -> float:
@@ -180,12 +245,12 @@ class FieldNavEnv(gym.Env):
 
     def _observation(self) -> dict[str, np.ndarray]:
         return {
-            "costmap": obstacle_costmap(
+            "costmap": semantic_costmap(
                 (self.robot.x, self.robot.y, self.robot.heading),
                 self.obstacles,
                 map_size=self.map_size,
                 map_extent_m=self.map_extent_m,
-                inflation_radius_m=0.8,
+                inflation_radius_m=self.inflation_radius_m,
             ),
             "goal": self._goal_features(),
             "state": self._state_features(),
@@ -210,4 +275,12 @@ class FieldNavEnv(gym.Env):
             "collision": collision,
             "goal_reached": goal_reached,
             "steps": self._steps,
+            "object_counts": self._object_counts(),
+            "object_contact": dict(self.object_contact),
         }
+
+    def _object_counts(self) -> dict[str, int]:
+        counts = {"tree": 0, "bush": 0, "pothole": 0, "person": 0, "wall": 0}
+        for obj in self.obstacles:
+            counts[obj.kind] = counts.get(obj.kind, 0) + 1
+        return counts

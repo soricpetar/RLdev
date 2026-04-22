@@ -393,6 +393,14 @@ def training_processes(env: str) -> list[dict]:
     return processes
 
 
+def tailscale_ip() -> str | None:
+    try:
+        out = subprocess.check_output(["tailscale", "ip", "-4"], text=True).strip()
+    except Exception:
+        return None
+    return out.splitlines()[0].strip() if out else None
+
+
 def collect_state(env: str, checkpoint_dir: Path, log_dir: Path) -> dict:
     now = time.time()
     cp_env_dir = checkpoint_dir / env
@@ -512,16 +520,28 @@ def main():
     parser = argparse.ArgumentParser(description="Serve a local FieldNav training dashboard")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
+    parser.add_argument(
+        "--tailscale",
+        action="store_true",
+        help="Listen on all interfaces and print the Tailscale URL for remote monitoring.",
+    )
     parser.add_argument("--env", default="field_nav")
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
     args = parser.parse_args()
+
+    ts_ip = tailscale_ip()
+    if args.tailscale and args.host == "127.0.0.1":
+        args.host = "0.0.0.0"
 
     Handler.checkpoint_dir = args.checkpoint_dir
     Handler.log_dir = args.log_dir
     Handler.env = args.env
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"dashboard_url=http://{args.host}:{args.port}")
+    print(f"local_url=http://127.0.0.1:{args.port}")
+    if ts_ip:
+        print(f"tailscale_url=http://{ts_ip}:{args.port}")
     print(f"checkpoint_dir={args.checkpoint_dir}")
     print(f"log_dir={args.log_dir}")
     server.serve_forever()

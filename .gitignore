@@ -3,6 +3,8 @@ c_*.c
 pufferlib/extensions.c
 pufferlib/puffernet.c
 logs/
+navigation/artifacts/
+navigation/artifa/
 
 # Build dir
 build/
@@ -171,4 +173,3 @@ pufferlib/ocean/impulse_wars/benchmark/
 # Data
 resources/drive/data/*
 resources/drive/binaries/*
-

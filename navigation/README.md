@@ -25,6 +25,17 @@ Training outputs:
 - Puffer checkpoints under `checkpoint_dir/field_nav/<run_id>/*.bin`
 - Puffer metrics under `log_dir/field_nav/<run_id>.json`
 
+Remote monitoring over Tailscale:
+
+```bash
+python navigation/scripts/training_dashboard.py \
+  --tailscale \
+  --checkpoint-dir navigation/artifacts/native_checkpoints \
+  --log-dir navigation/artifacts/native_logs
+```
+
+Open the printed `tailscale_url` from a phone connected to the same Tailnet.
+
 `field_nav` is registered as a native Ocean/Puffer environment in
 `config/field_nav.ini` and implemented in `ocean/field_nav`. The Puffer policy
 uses `FieldNavCompactEncoder`: the 5-channel semantic map is encoded with a

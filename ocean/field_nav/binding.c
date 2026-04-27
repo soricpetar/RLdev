@@ -23,6 +23,10 @@ void my_init(Env* env, Dict* kwargs) {
 
     env->max_steps = env_get_int(kwargs, "max_steps", 400);
     env->map_extent_m = env_get_float(kwargs, "map_extent_m", 12.0f);
+    env->polar_observation = env_get_int(kwargs, "polar_observation", 1);
+    env->polar_angle_bins = env_get_int(kwargs, "polar_angle_bins", FIELD_NAV_POLAR_ANGLE_BINS);
+    env->polar_distance_bins = env_get_int(kwargs, "polar_distance_bins", FIELD_NAV_POLAR_DISTANCE_BINS);
+    env->polar_max_distance_m = env_get_float(kwargs, "polar_max_distance_m", FIELD_NAV_POLAR_MAX_DISTANCE_M);
     env->world_size_m = env_get_float(kwargs, "world_size_m", 50.0f);
     env->dt = env_get_float(kwargs, "dt", 0.2f);
     env->fixed_speed_mps = env_get_float(kwargs, "fixed_speed_mps", 1.0f);
@@ -33,6 +37,10 @@ void my_init(Env* env, Dict* kwargs) {
     env->robot_radius_m = env_get_float(kwargs, "robot_radius_m", 0.35f);
     env->inflation_radius_m = env_get_float(kwargs, "inflation_radius_m", 1.0f);
     env->near_obstacle_threshold_m = env_get_float(kwargs, "near_obstacle_threshold_m", 2.0f);
+    env->reset_start_clearance_m = env_get_float(kwargs, "reset_start_clearance_m", 0.0f);
+    env->reset_goal_clearance_m = env_get_float(kwargs, "reset_goal_clearance_m", 0.0f);
+    env->reset_forward_clearance_m = env_get_float(kwargs, "reset_forward_clearance_m", 0.0f);
+    env->reset_forward_margin_m = env_get_float(kwargs, "reset_forward_margin_m", 0.0f);
 
     env->tree_rows_min = env_get_int(kwargs, "tree_rows_min", 2);
     env->tree_rows_max = env_get_int(kwargs, "tree_rows_max", 4);
@@ -44,6 +52,9 @@ void my_init(Env* env, Dict* kwargs) {
     env->people_max = env_get_int(kwargs, "people_max", 6);
     env->walls_min = env_get_int(kwargs, "walls_min", 1);
     env->walls_max = env_get_int(kwargs, "walls_max", 4);
+    env->curriculum_enabled = env_get_int(kwargs, "curriculum_enabled", 0);
+    env->curriculum_warmup_steps = env_get_int(kwargs, "curriculum_warmup_steps", 0);
+    env->lifetime_steps = 0;
 }
 
 void my_log(Log* log, Dict* out) {
@@ -52,4 +63,5 @@ void my_log(Log* log, Dict* out) {
     dict_set(out, "episode_length", log->episode_length);
     dict_set(out, "success_rate", log->success_rate);
     dict_set(out, "collision_rate", log->collision_rate);
+    dict_set(out, "curriculum_progress", log->curriculum_progress);
 }

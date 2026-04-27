@@ -50,9 +50,12 @@ class FieldNavVec:
 
     def _env_kwargs(self, cfg):
         kwargs = {}
-        int_keys = {"map_size", "max_steps"}
+        int_keys = {"map_size", "local_map_size", "global_map_size", "polar_angle_bins", "polar_distance_bins", "max_steps", "curriculum_warmup_steps"}
         float_keys = {
             "map_extent_m",
+            "local_map_extent_m",
+            "global_map_extent_m",
+            "polar_max_distance_m",
             "world_size_m",
             "dt",
             "fixed_speed_mps",
@@ -63,15 +66,22 @@ class FieldNavVec:
             "robot_radius_m",
             "inflation_radius_m",
             "near_obstacle_threshold_m",
+            "reset_start_clearance_m",
+            "reset_goal_clearance_m",
+            "reset_forward_clearance_m",
+            "reset_forward_margin_m",
         }
         int_range_keys = {"num_obstacles_range", "tree_rows_range", "bushes_range", "potholes_range", "people_range", "walls_range"}
         float_range_keys = {"obstacle_radius_range_m"}
+        bool_keys = {"polar_observation", "behavioral_observation", "foveated_observation", "curriculum_enabled"}
 
         for key, value in cfg.items():
             if key in int_keys:
                 kwargs[key] = int(value)
             elif key in float_keys:
                 kwargs[key] = float(value)
+            elif key in bool_keys:
+                kwargs[key] = str(value).lower() in {"1", "true", "yes", "on"}
             elif key in int_range_keys:
                 kwargs[key] = self._range(value, int)
             elif key in float_range_keys:
@@ -130,11 +140,16 @@ class FieldNavVec:
         lengths = np.asarray(self.finished_lengths, dtype=np.float32)
         successes = np.asarray(self.finished_success, dtype=np.float32)
         collisions = np.asarray(self.finished_collision, dtype=np.float32)
+        curriculum = np.asarray(
+            [env.env._curriculum_progress() for env in self.envs],
+            dtype=np.float32,
+        )
         return {
             "score": float(returns.mean()) if returns.size else 0.0,
             "episode_length": float(lengths.mean()) if lengths.size else 0.0,
             "success_rate": float(successes.mean()) if successes.size else 0.0,
             "collision_rate": float(collisions.mean()) if collisions.size else 0.0,
+            "curriculum_progress": float(curriculum.mean()) if curriculum.size else 1.0,
             "n": float(self.episodes_finished),
         }
 

@@ -275,12 +275,19 @@ class PuffeRL:
         anneal_beta = b0 + (1 - b0)*a*self.epoch/self.total_epochs
         self.ratio[:] = 1
 
-        learning_rate = config['learning_rate']
+        base_learning_rate = config['learning_rate']
+        learning_rate = base_learning_rate
         if config['anneal_lr'] and self.epoch > 0:
             lr_ratio = self.epoch / self.total_epochs
-            lr_min = config['learning_rate'] * config['min_lr_ratio']
-            learning_rate = lr_min + 0.5*(learning_rate - lr_min) * (1 + np.cos(np.pi * lr_ratio))
-            self.optimizer.param_groups[0]['lr'] = learning_rate
+            lr_min = base_learning_rate * config['min_lr_ratio']
+            learning_rate = lr_min + 0.5*(base_learning_rate - lr_min) * (1 + np.cos(np.pi * lr_ratio))
+
+        warmup_steps = int(config.get('lr_warmup_steps', 0) or 0)
+        if warmup_steps > 0:
+            warmup_ratio = min(1.0, self.global_step / max(1, warmup_steps))
+            start_ratio = float(config.get('lr_warmup_start_ratio', 0.1))
+            learning_rate *= start_ratio + (1.0 - start_ratio) * warmup_ratio
+        self.optimizer.param_groups[0]['lr'] = learning_rate
 
         # Transpose from [horizon, agents] (contiguous writes) to [agents, horizon] (minibatch indexing)
         obs = self.observations.transpose(0, 1).contiguous()
@@ -364,6 +371,7 @@ class PuffeRL:
         prof.elapsed(P.TRAIN, 0, 1)
 
         losses = {k: v.item() / num_minibatches for k, v in losses.items()}
+        losses['learning_rate'] = learning_rate
         y_pred = val.flatten()
         y_true = advantages.flatten() + val.flatten()
         var_y = y_true.var()

@@ -37,6 +37,8 @@ OBJECT_COSTS = {
 
 COLLIDABLE_KINDS = {"tree", "wall", "person"}
 SEMANTIC_CHANNELS = ("hard_static", "soft_vegetation", "terrain_hazard", "dynamic_person", "wall")
+BEHAVIOR_CHANNELS = ("static_obstacle", "moving_obstacle", "soft_hazard")
+POLAR_CHANNELS = BEHAVIOR_CHANNELS
 
 
 def semantic_channel(kind: str) -> int:
@@ -50,6 +52,14 @@ def semantic_channel(kind: str) -> int:
         return 3
     if kind == "wall":
         return 4
+    return 0
+
+
+def behavior_channel(kind: str) -> int:
+    if kind == "person":
+        return 1
+    if kind in {"bush", "pothole"}:
+        return 2
     return 0
 
 
@@ -261,6 +271,141 @@ def semantic_costmap(
             layer[:] = np.maximum(layer, np.clip(inflated_cost, 0.0, 1.0).astype(np.float32))
 
     return costmap
+
+
+def behavioral_costmap(
+    robot_xyh: tuple[float, float, float],
+    objects: list[Object],
+    map_size: int,
+    map_extent_m: float,
+    inflation_radius_m: float,
+) -> np.ndarray:
+    rx, ry, heading = robot_xyh
+
+    half = map_extent_m / 2.0
+    grid = np.linspace(-half, half, map_size, dtype=np.float32)
+    gx, gy = np.meshgrid(grid, grid, indexing="xy")
+
+    cos_h = np.cos(heading)
+    sin_h = np.sin(heading)
+
+    wx = rx + gx * cos_h - gy * sin_h
+    wy = ry + gx * sin_h + gy * cos_h
+
+    costmap = np.zeros((len(BEHAVIOR_CHANNELS), map_size, map_size), dtype=np.float32)
+    for obj in objects:
+        if isinstance(obj, WallObstacle):
+            d = point_segment_distance(wx, wy, obj.x1, obj.y1, obj.x2, obj.y2)
+            margin = d - obj.thickness * 0.5
+        else:
+            d = np.sqrt((wx - obj.x) ** 2 + (wy - obj.y) ** 2)
+            margin = d - obj.radius
+
+        occupied = margin <= 0
+        inflated = (margin > 0) & (margin < inflation_radius_m)
+        channel = behavior_channel(obj.kind)
+        cost = object_cost(obj.kind)
+
+        layer = costmap[channel]
+        layer[:] = np.maximum(layer, occupied.astype(np.float32) * cost)
+        if np.any(inflated):
+            inflated_cost = cost * (1.0 - (margin / inflation_radius_m))
+            layer[:] = np.maximum(layer, np.clip(inflated_cost, 0.0, 1.0).astype(np.float32))
+
+    return costmap
+
+
+def _polar_bin_range(center: float, extent: float, bins: int, lo: float, hi: float) -> tuple[int, int]:
+    if hi <= lo:
+        return 0, bins - 1
+    start = int(np.floor((center - extent - lo) / (hi - lo) * bins))
+    end = int(np.ceil((center + extent - lo) / (hi - lo) * bins))
+    return max(0, start), min(bins - 1, end)
+
+
+def _polar_wrap_bins(start: int, end: int, bins: int) -> list[tuple[int, int]]:
+    if bins <= 0:
+        return []
+    if end < start:
+        return [(0, bins - 1)]
+    if start < 0 or end >= bins:
+        return [((start % bins), (end % bins))]
+    return [(start, end)]
+
+
+def polar_costmap(
+    robot_xyh: tuple[float, float, float],
+    objects: list[Object],
+    angle_bins: int,
+    distance_bins: int,
+    max_distance_m: float,
+    inflation_radius_m: float,
+) -> np.ndarray:
+    rx, ry, heading = robot_xyh
+    map_ = np.zeros((len(POLAR_CHANNELS), angle_bins, distance_bins), dtype=np.float32)
+    if angle_bins <= 0 or distance_bins <= 0 or max_distance_m <= 0:
+        return map_
+
+    def mark_point(px: float, py: float, kind: str, radius: float) -> None:
+        dx = px - rx
+        dy = py - ry
+        cos_h = np.cos(heading)
+        sin_h = np.sin(heading)
+        lx = dx * cos_h + dy * sin_h
+        ly = -dx * sin_h + dy * cos_h
+        dist = float(np.sqrt(lx * lx + ly * ly))
+        if dist > max_distance_m:
+            return
+
+        angle = float(np.arctan2(ly, lx))
+        channel = behavior_channel(kind)
+        cost = object_cost(kind)
+        radial_extent = max(radius, inflation_radius_m)
+        angular_extent = float(np.arctan2(radial_extent, max(dist, 1e-3)))
+
+        a_start = int(np.floor((angle - angular_extent + np.pi) / (2.0 * np.pi) * angle_bins))
+        a_end = int(np.ceil((angle + angular_extent + np.pi) / (2.0 * np.pi) * angle_bins))
+        d_start = int(np.floor((dist - radial_extent) / max_distance_m * distance_bins))
+        d_end = int(np.ceil((dist + radial_extent) / max_distance_m * distance_bins))
+
+        d_start = max(0, d_start)
+        d_end = min(distance_bins - 1, d_end)
+        if d_end < d_start:
+            return
+
+        for a0, a1 in _polar_wrap_bins(a_start, a_end, angle_bins):
+            if a1 < a0:
+                spans = [(a0, angle_bins - 1), (0, a1)]
+            else:
+                spans = [(a0, a1)]
+            for aa0, aa1 in spans:
+                aa0 = max(0, aa0)
+                aa1 = min(angle_bins - 1, aa1)
+                if aa1 < aa0:
+                    continue
+                for ab in range(aa0, aa1 + 1):
+                    for db in range(d_start, d_end + 1):
+                        map_[channel, ab, db] = max(map_[channel, ab, db], cost)
+
+    for obj in objects:
+        if isinstance(obj, WallObstacle):
+            seg_len = float(np.sqrt((obj.x2 - obj.x1) ** 2 + (obj.y2 - obj.y1) ** 2))
+            sample_count = max(3, int(np.ceil(seg_len / 1.5)))
+            for i in range(sample_count + 1):
+                t = i / max(1, sample_count)
+                px = obj.x1 + t * (obj.x2 - obj.x1)
+                py = obj.y1 + t * (obj.y2 - obj.y1)
+                mark_point(px, py, obj.kind, obj.thickness * 0.5)
+        else:
+            sample_count = 6 if obj.kind == "tree" else 4
+            for i in range(sample_count):
+                theta = (2.0 * np.pi * i) / sample_count
+                px = obj.x + np.cos(theta) * obj.radius
+                py = obj.y + np.sin(theta) * obj.radius
+                mark_point(px, py, obj.kind, obj.radius)
+            mark_point(obj.x, obj.y, obj.kind, obj.radius)
+
+    return map_
 
 
 def collision_distance(

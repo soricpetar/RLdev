@@ -15,6 +15,10 @@ int main(void) {
     env.rng = 1;
     env.max_steps = 400;
     env.map_extent_m = 12.0f;
+    env.polar_observation = 1;
+    env.polar_angle_bins = FIELD_NAV_POLAR_ANGLE_BINS;
+    env.polar_distance_bins = FIELD_NAV_POLAR_DISTANCE_BINS;
+    env.polar_max_distance_m = FIELD_NAV_POLAR_MAX_DISTANCE_M;
     env.world_size_m = 50.0f;
     env.dt = 0.2f;
     env.fixed_speed_mps = 1.0f;
@@ -25,6 +29,10 @@ int main(void) {
     env.robot_radius_m = 0.35f;
     env.inflation_radius_m = 1.0f;
     env.near_obstacle_threshold_m = 2.0f;
+    env.reset_start_clearance_m = 1.0f;
+    env.reset_goal_clearance_m = 1.0f;
+    env.reset_forward_clearance_m = 1.5f;
+    env.reset_forward_margin_m = 0.25f;
     env.tree_rows_min = 2;
     env.tree_rows_max = 4;
     env.bushes_min = 6;

@@ -123,6 +123,171 @@ class FieldNavCompactEncoder(nn.Module):
         h_vec = self.vector_encoder(vector)
         return self.proj(torch.cat([h_map, h_vec], dim=-1))
 
+class FieldNavMediumEncoder(nn.Module):
+    def __init__(self, obs_size, hidden_size=192, map_channels=5, map_size=64, **kwargs):
+        super().__init__()
+        self.map_channels = int(map_channels)
+        self.map_size = int(map_size)
+        self.map_dim = self.map_channels * self.map_size * self.map_size
+        self.vector_dim = int(obs_size) - self.map_dim
+        if self.vector_dim <= 0:
+            raise ValueError(
+                f"obs_size={obs_size} is too small for a "
+                f"{self.map_channels}x{self.map_size}x{self.map_size} field_nav map"
+            )
+
+        self.map_encoder = nn.Sequential(
+            nn.Conv2d(self.map_channels, 16, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 48, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((8, 8)),
+            nn.Flatten(),
+            nn.Linear(48 * 8 * 8, hidden_size),
+            nn.ReLU(),
+        )
+        self.vector_encoder = nn.Sequential(
+            nn.Linear(self.vector_dim, 48),
+            nn.ReLU(),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(hidden_size + 48, hidden_size),
+            nn.ReLU(),
+        )
+
+    def forward(self, observations):
+        observations = observations.float().view(observations.shape[0], -1)
+        costmap = observations[:, : self.map_dim].reshape(
+            -1, self.map_channels, self.map_size, self.map_size
+        )
+        vector = observations[:, self.map_dim :]
+        h_map = self.map_encoder(costmap)
+        h_vec = self.vector_encoder(vector)
+        return self.proj(torch.cat([h_map, h_vec], dim=-1))
+
+class FieldNavFoveatedEncoder(nn.Module):
+    def __init__(
+        self,
+        obs_size,
+        hidden_size=256,
+        map_channels=3,
+        local_map_size=32,
+        global_map_size=32,
+        **kwargs,
+    ):
+        super().__init__()
+        self.map_channels = int(map_channels)
+        self.local_map_size = int(local_map_size)
+        self.global_map_size = int(global_map_size)
+        self.local_map_dim = self.map_channels * self.local_map_size * self.local_map_size
+        self.global_map_dim = self.map_channels * self.global_map_size * self.global_map_size
+        self.map_dim = self.local_map_dim + self.global_map_dim
+        self.vector_dim = int(obs_size) - self.map_dim
+        if self.vector_dim <= 0:
+            raise ValueError(
+                f"obs_size={obs_size} is too small for a foveated field_nav map "
+                f"({self.map_channels}x{self.local_map_size}x{self.local_map_size} + "
+                f"{self.map_channels}x{self.global_map_size}x{self.global_map_size})"
+            )
+
+        branch_hidden = max(32, hidden_size // 2)
+        self.local_encoder = nn.Sequential(
+            nn.Conv2d(self.map_channels, 16, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.Flatten(),
+            nn.Linear(32 * 4 * 4, branch_hidden),
+            nn.ReLU(),
+        )
+        self.global_encoder = nn.Sequential(
+            nn.Conv2d(self.map_channels, 12, kernel_size=5, stride=2, padding=2),
+            nn.ReLU(),
+            nn.Conv2d(12, 24, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(24, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((4, 4)),
+            nn.Flatten(),
+            nn.Linear(32 * 4 * 4, branch_hidden),
+            nn.ReLU(),
+        )
+        self.vector_encoder = nn.Sequential(
+            nn.Linear(self.vector_dim, 48),
+            nn.ReLU(),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(2 * branch_hidden + 48, hidden_size),
+            nn.ReLU(),
+        )
+
+    def forward(self, observations):
+        observations = observations.float().view(observations.shape[0], -1)
+        local = observations[:, : self.local_map_dim].reshape(
+            -1, self.map_channels, self.local_map_size, self.local_map_size
+        )
+        global_start = self.local_map_dim
+        global_end = global_start + self.global_map_dim
+        global_map = observations[:, global_start:global_end].reshape(
+            -1, self.map_channels, self.global_map_size, self.global_map_size
+        )
+        vector = observations[:, global_end:]
+        h_local = self.local_encoder(local)
+        h_global = self.global_encoder(global_map)
+        h_vec = self.vector_encoder(vector)
+        return self.proj(torch.cat([h_local, h_global, h_vec], dim=-1))
+
+class FieldNavPolarEncoder(nn.Module):
+    def __init__(
+        self,
+        obs_size,
+        hidden_size=256,
+        map_channels=3,
+        polar_angle_bins=32,
+        polar_distance_bins=16,
+        **kwargs,
+    ):
+        super().__init__()
+        self.map_channels = int(map_channels)
+        self.polar_angle_bins = int(polar_angle_bins)
+        self.polar_distance_bins = int(polar_distance_bins)
+        self.map_dim = self.map_channels * self.polar_angle_bins * self.polar_distance_bins
+        self.vector_dim = int(obs_size) - self.map_dim
+        if self.vector_dim <= 0:
+            raise ValueError(
+                f"obs_size={obs_size} is too small for a polar field_nav map "
+                f"({self.map_channels}x{self.polar_angle_bins}x{self.polar_distance_bins})"
+            )
+
+        self.map_encoder = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(self.map_dim, hidden_size),
+            nn.ReLU(),
+        )
+        self.vector_encoder = nn.Sequential(
+            nn.Linear(self.vector_dim, 48),
+            nn.ReLU(),
+        )
+        self.proj = nn.Sequential(
+            nn.Linear(hidden_size + 48, hidden_size),
+            nn.ReLU(),
+        )
+
+    def forward(self, observations):
+        observations = observations.float().view(observations.shape[0], -1)
+        costmap = observations[:, : self.map_dim].reshape(
+            -1, self.map_channels, self.polar_angle_bins, self.polar_distance_bins
+        )
+        vector = observations[:, self.map_dim :]
+        h_map = self.map_encoder(costmap)
+        h_vec = self.vector_encoder(vector)
+        return self.proj(torch.cat([h_map, h_vec], dim=-1))
+
 class DefaultDecoder(nn.Module):
     def __init__(self, nvec, hidden_size=128):
         super().__init__()

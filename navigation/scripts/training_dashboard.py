@@ -157,6 +157,10 @@ function series(history, key) {
   return (history || []).map(p => [Number(p.agent_steps ?? p.steps ?? 0), Number(p[key])]).filter(p => Number.isFinite(p[1]));
 }
 
+function seriesMap(history, key, fn) {
+  return series(history, key).map(p => [p[0], fn(p[1])]).filter(p => Number.isFinite(p[1]));
+}
+
 function visibleSeries(data) {
   if (!data.length || viewPct >= 100) return data;
   const keep = Math.max(2, Math.ceil(data.length * viewPct / 100));
@@ -181,6 +185,17 @@ function transformSeries(data) {
   return smoothSeries(visibleSeries(data));
 }
 
+function rollingBestSeries(data, mode) {
+  if (!data.length) return [];
+  const out = [];
+  let best = data[0][1];
+  for (const point of data) {
+    best = mode === 'min' ? Math.min(best, point[1]) : Math.max(best, point[1]);
+    out.push([point[0], best]);
+  }
+  return visibleSeries(out);
+}
+
 function drawChart(canvas, title, lines) {
   const ctx = canvas.getContext('2d');
   const dpr = window.devicePixelRatio || 1;
@@ -196,8 +211,19 @@ function drawChart(canvas, title, lines) {
   ctx.font = '600 13px system-ui';
   ctx.fillText(title, 12, 20);
   const left = 48, right = 12, top = 34, bottom = 28;
-  const prepared = lines.map(l => ({...l, data: transformSeries(l.data)}));
-  const pts = prepared.flatMap(l => l.data);
+  const prepared = lines.map(l => ({...l, data: transformSeries(l.data), dash: []}));
+  const bestLines = lines
+    .filter(l => l.best)
+    .map(l => ({
+      ...l,
+      name: `${l.name} best`,
+      data: rollingBestSeries(l.data, l.best),
+      dash: [5, 4],
+      width: 1.5,
+      alpha: 0.82,
+    }));
+  const allLines = prepared.concat(bestLines);
+  const pts = allLines.flatMap(l => l.data);
   if (!pts.length) {
     ctx.fillStyle = '#9aa8b2';
     ctx.font = '12px system-ui';
@@ -227,14 +253,34 @@ function drawChart(canvas, title, lines) {
   ctx.fillText(num(ymin), 6, h - bottom);
   for (const line of prepared) {
     if (!line.data.length) continue;
+    ctx.setLineDash(line.dash || []);
+    ctx.globalAlpha = line.alpha || 1;
     ctx.strokeStyle = line.color;
-    ctx.lineWidth = 2;
+    ctx.lineWidth = line.width || 2;
     ctx.beginPath();
     line.data.forEach((p, i) => {
       const x = xscale(p[0]), y = yscale(p[1]);
       if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     });
     ctx.stroke();
+  }
+  for (const line of bestLines) {
+    if (!line.data.length) continue;
+    ctx.setLineDash(line.dash || []);
+    ctx.globalAlpha = line.alpha || 1;
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = line.width || 1.5;
+    ctx.beginPath();
+    line.data.forEach((p, i) => {
+      const x = xscale(p[0]), y = yscale(p[1]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  for (const line of prepared) {
+    if (!line.data.length) continue;
     const last = line.data[line.data.length - 1];
     ctx.fillStyle = line.color;
     ctx.fillText(`${line.name}: ${num(last[1])}`, 12 + prepared.indexOf(line) * 150, h - 8);
@@ -301,20 +347,19 @@ async function refresh() {
   document.getElementById('collision').textContent = pct(Number(latest['env/collision_rate']));
   document.getElementById('score').textContent = num(Number(latest['env/score']));
   document.getElementById('epLen').textContent = `episode length ${num(Number(latest['env/episode_length']))}`;
-  drawChart(document.getElementById('quality'), 'Success / Collision', [
-    {name:'success', color:'#42d392', data:series(history, 'env/success_rate')},
-    {name:'collision', color:'#ff6b6b', data:series(history, 'env/collision_rate')},
+  drawChart(document.getElementById('quality'), 'Success / Avoidance', [
+    {name:'success', color:'#42d392', data:series(history, 'env/success_rate'), best:'max'},
+    {name:'avoid', color:'#ff6b6b', data:seriesMap(history, 'env/collision_rate', v => 1 - v), best:'max'},
   ]);
-  drawChart(document.getElementById('return'), 'Return and Episode Length', [
-    {name:'score', color:'#6ea8fe', data:series(history, 'env/score')},
-    {name:'ep len', color:'#f4bf50', data:series(history, 'env/episode_length')},
+  drawChart(document.getElementById('return'), 'Return', [
+    {name:'score', color:'#6ea8fe', data:series(history, 'env/score'), best:'max'},
   ]);
-  drawChart(document.getElementById('loss'), 'Losses', [
-    {name:'value', color:'#f4bf50', data:series(history, 'loss/value_loss')},
+  drawChart(document.getElementById('loss'), 'Value Fit / Entropy', [
+    {name:'EV', color:'#f4bf50', data:series(history, 'loss/explained_variance'), best:'max'},
     {name:'entropy', color:'#24d6d6', data:series(history, 'loss/entropy')},
   ]);
   drawChart(document.getElementById('speed'), 'Throughput', [
-    {name:'SPS', color:'#42d392', data:series(history, 'SPS')},
+    {name:'SPS', color:'#42d392', data:series(history, 'SPS'), best:'max'},
   ]);
   document.getElementById('runs').innerHTML = data.runs.map(r => `
     <tr>

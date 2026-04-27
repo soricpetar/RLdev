@@ -2,7 +2,7 @@
 
 This directory contains a first implementation milestone for local navigation RL:
 
-- `FieldNavEnv`: a 2D local-navigation environment with a robot-centered 5x64x64 semantic risk map,
+- `FieldNavEnv`: a 2D local-navigation environment with a robot-centered polar obstacle map,
   a compact goal vector, and robot state features.
 - Mixed scene objects: tree rows, bushes, potholes, moving people, and wall segments.
 - Discrete steering actions with fixed forward speed.
@@ -37,16 +37,15 @@ python navigation/scripts/training_dashboard.py \
 Open the printed `tailscale_url` from a phone connected to the same Tailnet.
 
 `field_nav` is registered as a native Ocean/Puffer environment in
-`config/field_nav.ini` and implemented in `ocean/field_nav`. The Puffer policy
-uses `FieldNavCompactEncoder`: the 5-channel semantic map is encoded with a
+`config/field_nav.ini` and implemented in `ocean/field_nav`. The current Puffer
+policy uses `FieldNavPolarEncoder`: a `3 x 32 x 16` polar map is encoded with a
 compact convolutional stack, then concatenated with the compact goal/state
 features before the actor and value heads.
 
 On Apple Silicon, `--device auto` uses MPS when CUDA is not available. You can
 force it with `--device mps` or compare against CPU with `--device cpu`.
-The default config favors higher environment SPS with 32 agents and
-`train.replay_ratio = 1.0`; increase `--train.replay-ratio` if you want more PPO
-optimization passes per collected batch.
+The default config uses 64 agents, `train.replay_ratio = 2.0`, LR warmup, and a
+nonzero LR floor for continuation training.
 
 ## Notes on dependencies
 
@@ -54,16 +53,18 @@ The environment uses `gymnasium` if installed. In constrained environments where
 `gymnasium` is unavailable, it falls back to a tiny local space implementation
 so rollout/training scripts can still run.
 
-## Costmap Channels
+## Observation Channels
 
-The local map is centered on the robot and rotated into the robot heading frame.
-Each cell stores object risk in one semantic channel:
+The default observation uses polar bins centered on the robot and rotated into
+the robot heading frame. The three behavior channels are:
 
-1. hard static objects, such as trees
-2. soft vegetation, such as bushes
-3. terrain hazards, such as potholes
-4. dynamic people
-5. wall segments
+1. static collidable obstacles, such as trees and walls
+2. moving obstacles, such as people
+3. soft hazards, such as bushes and potholes
+
+Reset sampling rejects layouts with collidable objects too close to the robot
+start, goal, or immediate forward path. This keeps training focused on reachable
+navigation episodes instead of unavoidable first-step collisions.
 
 ## Next Steps
 

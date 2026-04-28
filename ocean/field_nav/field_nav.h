@@ -62,6 +62,11 @@ typedef struct FieldNav {
     float world_size_m;
     float dt;
     float fixed_speed_mps;
+    float min_speed_mps;
+    float max_speed_mps;
+    float acceleration_mps2;
+    float brake_deceleration_mps2;
+    float coast_deceleration_mps2;
     float max_turn_rate_rps;
     float min_goal_distance_m;
     float max_goal_distance_m;
@@ -289,7 +294,8 @@ static inline float fn_point_collidable_clearance(FieldNav* env, float x, float 
 static inline int fn_forward_path_clear(FieldNav* env) {
     if (env->reset_forward_clearance_m <= 0.0f) return 1;
 
-    float step_distance = env->fixed_speed_mps * env->dt;
+    float reset_speed = fmaxf(env->fixed_speed_mps, env->max_speed_mps);
+    float step_distance = reset_speed * env->dt;
     int sample_count = (int)ceilf(env->reset_forward_clearance_m / fmaxf(step_distance, 1e-6f));
     if (sample_count < 2) sample_count = 2;
     float cos_h = cosf(env->heading);
@@ -532,7 +538,7 @@ static inline void fn_compute_observation(FieldNav* env) {
 static inline void c_reset(FieldNav* env) {
     env->steps = 0;
     env->prev_steering = 0.0f;
-    env->speed = env->fixed_speed_mps;
+    env->speed = fn_clip(env->fixed_speed_mps, env->min_speed_mps, env->max_speed_mps);
     env->yaw_rate = 0.0f;
     env->episode_return = 0.0f;
     env->episode_length = 0;
@@ -582,14 +588,26 @@ static inline void fn_add_episode_log(FieldNav* env, int success, int collision)
 
 static inline void c_step(FieldNav* env) {
     static const float steering_values[5] = {-1.0f, -0.5f, 0.0f, 0.5f, 1.0f};
+    static const float throttle_values[3] = {-1.0f, 0.0f, 1.0f};
     int action = (int)env->actions[0];
     if (action < 0) action = 0;
-    if (action > 4) action = 4;
-    float steering = steering_values[action];
+    if (action > 14) action = 14;
+    int steering_idx = action / 3;
+    int throttle_idx = action % 3;
+    float steering = steering_values[steering_idx];
+    float throttle = throttle_values[throttle_idx];
+
+    if (throttle > 0.0f) {
+        env->speed += env->acceleration_mps2 * env->dt;
+    } else if (throttle < 0.0f) {
+        env->speed -= env->brake_deceleration_mps2 * env->dt;
+    } else {
+        env->speed -= env->coast_deceleration_mps2 * env->dt;
+    }
+    env->speed = fn_clip(env->speed, env->min_speed_mps, env->max_speed_mps);
 
     env->yaw_rate = steering * env->max_turn_rate_rps;
     env->heading = fn_wrap_pi(env->heading + env->yaw_rate * env->dt);
-    env->speed = env->fixed_speed_mps;
     env->robot_x += cosf(env->heading) * env->speed * env->dt;
     env->robot_y += sinf(env->heading) * env->speed * env->dt;
     env->steps += 1;

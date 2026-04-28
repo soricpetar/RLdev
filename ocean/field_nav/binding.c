@@ -2,7 +2,7 @@
 
 #define OBS_SIZE FIELD_NAV_OBS_SIZE
 #define NUM_ATNS 1
-#define ACT_SIZES {5}
+#define ACT_SIZES {15}
 #define OBS_TENSOR_T FloatTensor
 
 #define Env FieldNav
@@ -30,6 +30,11 @@ void my_init(Env* env, Dict* kwargs) {
     env->world_size_m = env_get_float(kwargs, "world_size_m", 50.0f);
     env->dt = env_get_float(kwargs, "dt", 0.2f);
     env->fixed_speed_mps = env_get_float(kwargs, "fixed_speed_mps", 1.0f);
+    env->min_speed_mps = env_get_float(kwargs, "min_speed_mps", 0.0f);
+    env->max_speed_mps = env_get_float(kwargs, "max_speed_mps", 1.6f);
+    env->acceleration_mps2 = env_get_float(kwargs, "acceleration_mps2", 1.5f);
+    env->brake_deceleration_mps2 = env_get_float(kwargs, "brake_deceleration_mps2", 2.5f);
+    env->coast_deceleration_mps2 = env_get_float(kwargs, "coast_deceleration_mps2", 0.3f);
     env->max_turn_rate_rps = env_get_float(kwargs, "max_turn_rate_rps", 1.0f);
     env->min_goal_distance_m = env_get_float(kwargs, "min_goal_distance_m", 10.0f);
     env->max_goal_distance_m = env_get_float(kwargs, "max_goal_distance_m", 22.0f);

@@ -455,3 +455,300 @@ Next recommendation:
 - Promote or fixed-evaluate the `0000000015986688.bin` checkpoint from this run before continuing.
 - Run the same visual failure analysis on this checkpoint using reset clearance enabled.
 - If remaining failures are mostly late wall/tree collisions, the next reward experiment should add a stronger clearance objective or evaluate a promotion metric that weights collision rate above raw return.
+
+## Experiment 11 - Speed Control 25M From Scratch
+
+Purpose:
+
+- Test the new 15-action controller: `5` steering bins times `3` speed bins.
+- Speed bins are brake, coast, and accelerate.
+- Determine whether allowing braking/acceleration improves navigation quality enough to justify the larger action space.
+
+Setup:
+
+- initialization: fresh policy
+- observation: polar bins, `3 x 32 x 16 + 7`
+- encoder: `FieldNavPolarEncoder`
+- actions: `15` discrete actions
+- speed range: `0.0m/s` to `1.6m/s`
+- acceleration: `1.5m/s^2`
+- brake deceleration: `2.5m/s^2`
+- coast deceleration: `0.3m/s^2`
+- agents: `64`
+- replay ratio: `2.0`
+- entropy coefficient: `0.015`
+- minimum LR ratio: `0.3`
+- LR warmup: `500k` aggregate steps
+- reset clearance: enabled
+- curriculum: disabled
+- total steps: `25M`
+
+Run:
+
+- run id: `1777298593426`
+- checkpoint dir: `navigation/artifacts/speed_control_25m_checkpoints/field_nav/1777298593426`
+- log dir: `navigation/artifacts/speed_control_25m_logs/field_nav`
+
+Results:
+
+- final steps: `24,993,792`
+- final score: `18.29`
+- final success rate: `70.6%`
+- final collision rate: `29.4%`
+- final explained variance: `0.789`
+- final measured entropy: `2.001`
+- final SPS: `62,540`
+- best score: `20.76` at `21.91M` steps
+- best score checkpoint nearest to peak: `0000000021884928.bin`
+- best score point success/collision: `76.2%` success, `23.9%` collision
+
+Interpretation:
+
+- Speed control learned from scratch, but it is currently much worse than the fixed-speed reset-clearance policy.
+- The larger action space keeps the policy substantially more stochastic; final entropy is still around `2.0` versus about `0.83` in the fixed-speed reset-clearance run.
+- The value function is usable but weaker than the mature fixed-speed runs, with explained variance below `0.8`.
+- The result does not prove braking is bad; it mostly shows the new controller needs either continuation or stronger action regularization.
+
+Next experiment:
+
+- Continue from the best speed-control checkpoint, `0000000021884928.bin`.
+- Lower entropy coefficient from `0.015` to `0.005`.
+- Keep the speed-control dynamics, reset clearance, LR floor, replay ratio, and polar encoder unchanged.
+- Run another `25M` steps and select by best checkpoint, not final checkpoint.
+
+## Experiment 12 - Speed Control 25M, Entropy 0.005 From Peak
+
+Purpose:
+
+- Continue the best speed-control checkpoint from Experiment 11.
+- Lower entropy pressure to make the larger 15-action policy more decisive.
+- Check whether the high collision rate from Experiment 11 was partly caused by excessive action stochasticity.
+
+Setup:
+
+- initialization: best score checkpoint from Experiment 11
+- loaded checkpoint: `navigation/artifacts/speed_control_25m_checkpoints/field_nav/1777298593426/0000000021884928.bin`
+- observation: polar bins, `3 x 32 x 16 + 7`
+- encoder: `FieldNavPolarEncoder`
+- actions: `15` discrete actions
+- speed range: `0.0m/s` to `1.6m/s`
+- agents: `64`
+- replay ratio: `2.0`
+- entropy coefficient: `0.005`
+- minimum LR ratio: `0.3`
+- LR warmup: `500k` aggregate steps
+- reset clearance: enabled
+- curriculum: disabled
+- total steps: `25M`
+
+Run:
+
+- run id: `1777302165839`
+- checkpoint dir: `navigation/artifacts/speed_control_ent005_25m_checkpoints/field_nav/1777302165839`
+- log dir: `navigation/artifacts/speed_control_ent005_25m_logs/field_nav`
+
+Results:
+
+- final steps: `24,993,792`
+- final score: `27.16`
+- final success rate: `87.8%`
+- final collision rate: `12.2%`
+- final explained variance: `0.930`
+- final measured entropy: `1.041`
+- final SPS: `60,654`
+- best score: `27.66` at `21.92M` steps
+- best score checkpoint nearest to peak: `0000000021884928.bin`
+- best score point success/collision: `88.2%` success, `11.8%` collision
+
+Interpretation:
+
+- Lowering entropy was a clear improvement over Experiment 11.
+- The policy became much more decisive: measured entropy dropped from about `2.0` to about `1.0`.
+- Value fit recovered to the same healthy range as the older fixed-speed policies.
+- The speed-control policy is now useful, but still behind the fixed-speed reset-clearance policy, which reached `95.8%` final success and `4.2%` final collision.
+- The remaining gap is likely not just policy stochasticity; the speed/action dynamics may be making the agent drive too aggressively because progress reward favors speed.
+
+Next experiment:
+
+- Continue from the best Experiment 12 checkpoint.
+- Keep entropy coefficient at `0.005`.
+- Reduce `max_speed_mps` from `1.6` to `1.2`.
+- Keep reset clearance and the reward unchanged.
+- This isolates whether the high collision rate is caused by the faster speed envelope rather than braking itself.
+
+## Experiment 13 - Speed Control 25M, Entropy 0.005, Max Speed 1.2
+
+Purpose:
+
+- Test whether the speed-control policy was underperforming because the `1.6m/s` speed envelope encouraged overly aggressive driving.
+- Keep the reward unchanged and isolate the dynamics change.
+
+Setup:
+
+- initialization: best score checkpoint from Experiment 12
+- loaded checkpoint: `navigation/artifacts/speed_control_ent005_25m_checkpoints/field_nav/1777302165839/0000000021884928.bin`
+- observation: polar bins, `3 x 32 x 16 + 7`
+- encoder: `FieldNavPolarEncoder`
+- actions: `15` discrete actions
+- speed range: `0.0m/s` to `1.2m/s`
+- agents: `64`
+- replay ratio: `2.0`
+- entropy coefficient: `0.005`
+- minimum LR ratio: `0.3`
+- LR warmup: `500k` aggregate steps
+- reset clearance: enabled
+- curriculum: disabled
+- total steps: `25M`
+
+Run:
+
+- run id: `1777302613777`
+- checkpoint dir: `navigation/artifacts/speed_control_ent005_max12_25m_checkpoints/field_nav/1777302613777`
+- log dir: `navigation/artifacts/speed_control_ent005_max12_25m_logs/field_nav`
+
+Results:
+
+- final steps: `24,993,792`
+- final score: `29.76`
+- final success rate: `92.8%`
+- final collision rate: `7.2%`
+- final episode length: `80.2`
+- final explained variance: `0.949`
+- final measured entropy: `0.952`
+- final SPS: `62,076`
+- best score: `29.78` at `21.92M` steps
+- best score checkpoint nearest to peak: `0000000021884928.bin`
+- best score point success/collision: `92.9%` success, `7.1%` collision
+
+Interpretation:
+
+- Reducing max speed from `1.6m/s` to `1.2m/s` was a clear improvement.
+- Collision dropped from `12.2%` final in Experiment 12 to `7.2%` final here.
+- Success rose from `87.8%` to `92.8%`.
+- Episode length increased from about `57.7` to `80.2`, which is expected from the slower speed limit.
+- This nearly matches the best older fixed-speed continuation peaks, but still does not beat the reset-clearance fixed-speed run's best score of `33.65`.
+- The result strongly suggests that speed-control needs a speed envelope or reward term that prevents progress reward from overvaluing fast driving.
+
+Next experiment:
+
+- Continue from the best Experiment 13 checkpoint.
+- Reduce `max_speed_mps` again from `1.2` to `1.0`, matching the old fixed-speed top speed.
+- Keep braking/coasting/acceleration available, so the policy can slow below the old baseline but cannot exceed it.
+- This tests whether braking itself helps once extra top speed is removed.
+
+## Experiment 14 - Speed Control 25M, Entropy 0.005, Max Speed 1.0
+
+Purpose:
+
+- Test whether braking improves policy quality when the robot cannot exceed the old fixed-speed top speed.
+- Compare against Experiment 13 to see whether reducing speed further improves safety or only slows episodes down.
+
+Setup:
+
+- initialization: best score checkpoint from Experiment 13
+- loaded checkpoint: `navigation/artifacts/speed_control_ent005_max12_25m_checkpoints/field_nav/1777302613777/0000000021884928.bin`
+- observation: polar bins, `3 x 32 x 16 + 7`
+- encoder: `FieldNavPolarEncoder`
+- actions: `15` discrete actions
+- speed range: `0.0m/s` to `1.0m/s`
+- agents: `64`
+- replay ratio: `2.0`
+- entropy coefficient: `0.005`
+- minimum LR ratio: `0.3`
+- LR warmup: `500k` aggregate steps
+- reset clearance: enabled
+- curriculum: disabled
+- total steps: `25M`
+
+Run:
+
+- run id: `1777303060208`
+- checkpoint dir: `navigation/artifacts/speed_control_ent005_max10_25m_checkpoints/field_nav/1777303060208`
+- log dir: `navigation/artifacts/speed_control_ent005_max10_25m_logs/field_nav`
+
+Results:
+
+- final steps: `24,993,792`
+- final score: `29.45`
+- final success rate: `92.3%`
+- final collision rate: `7.7%`
+- final episode length: `96.4`
+- final explained variance: `0.942`
+- final measured entropy: `0.750`
+- final SPS: `46,926`
+- best score: `30.19` at `21.83M` steps
+- best score checkpoint nearest to peak: `0000000021884928.bin`
+- best score point success/collision: `94.1%` success, `5.8%` collision
+
+Interpretation:
+
+- Lowering max speed from `1.2m/s` to `1.0m/s` improved peak safety but did not improve final score.
+- The best checkpoint reached `94.1%` success and `5.8%` collision, which is safer than Experiment 13's best point but lower-score than the fixed-speed reset-clearance best.
+- Final quality regressed slightly relative to Experiment 13: score `29.45` versus `29.76`, success `92.3%` versus `92.8%`, collision `7.7%` versus `7.2%`.
+- Episode length increased to about `96`, so the time penalty is now meaningfully limiting score.
+- Throughput also dipped late, likely because longer episodes reduce reset frequency and change eval/training timing.
+
+Current speed-control takeaway:
+
+- The new 15-action controller can learn useful braking/acceleration behavior.
+- Entropy `0.005` is much better than `0.015` for this larger action space.
+- The original `1.6m/s` max speed was too aggressive.
+- `1.2m/s` is the best overall speed-control setting from these runs.
+- `1.0m/s` can reduce peak collision, but it pays too much in episode length and final score.
+
+Recommended next experiment:
+
+- Promote the Experiment 13 best checkpoint for fixed-seed visual evaluation:
+  `navigation/artifacts/speed_control_ent005_max12_25m_checkpoints/field_nav/1777302613777/0000000021884928.bin`
+- Compare it against the fixed-speed reset-clearance best checkpoint on the same held-out seeds.
+- If failures are mostly late obstacle contacts, add a reward term that penalizes high speed near obstacles instead of globally lowering max speed.
+
+## Fixed-Seed Eval - Speed Control vs Fixed Speed
+
+Purpose:
+
+- Compare the best speed-control checkpoint against the best fixed-speed reset-clearance checkpoint on identical held-out seeds.
+- Use deterministic Python env rollouts with reset clearance enabled.
+
+Setup:
+
+- episodes: `250`
+- seeds: `300000..300249`
+- max steps: `400`
+- reset start clearance: `1.0m`
+- reset goal clearance: `1.0m`
+- reset forward clearance: `1.5m`
+- reset forward margin: `0.25m`
+
+Checkpoints:
+
+- speed control: `navigation/artifacts/speed_control_ent005_max12_25m_checkpoints/field_nav/1777302613777/0000000021884928.bin`
+- fixed speed: `navigation/artifacts/polar_reset_clearance_25m_checkpoints/field_nav/1777285806862/0000000015986688.bin`
+
+Artifacts:
+
+- speed control render/eval: `navigation/artifacts/eval_speed_control_max12_best/`
+- fixed speed render/eval: `navigation/artifacts/eval_fixed_speed_reset_clearance_best/`
+
+Results:
+
+| policy | success | collision | timeout | mean return | mean steps | collision kinds |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| speed control max `1.2m/s` | `96.0%` | `3.6%` | `0.4%` | `32.27` | `66.1` | `7` tree, `1` wall, `1` person |
+| fixed speed `1.0m/s` | `97.6%` | `1.6%` | `0.8%` | `32.75` | `100.0` | `1` tree, `3` wall |
+
+Interpretation:
+
+- The fixed-speed checkpoint still wins on aggregate reliability: higher success and lower collision.
+- Speed control is much faster: `66` mean steps versus `100` for fixed speed.
+- Mean return is close despite the extra collisions because the speed-control policy reaches goals sooner.
+- Speed-control failures are mostly tree collisions, with one person collision; fixed-speed failures are mostly wall collisions plus one tree.
+- This suggests braking/acceleration is useful for speed, but the current reward does not sufficiently discourage fast approaches near hard obstacles.
+
+Next recommendation:
+
+- Keep max speed at `1.2m/s`.
+- Add a speed-aware clearance penalty instead of globally lowering speed:
+  penalize `speed * max(0, clearance_threshold - nearest_margin)` for hard obstacles.
+- Start from the Experiment 13 speed-control checkpoint and run `25M`.
+- Promote by fixed-seed eval, prioritizing collision rate first and mean return second.

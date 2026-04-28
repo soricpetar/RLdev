@@ -52,12 +52,20 @@ class EpisodeTrace:
 
 
 class PufferPolicyAdapter(torch.nn.Module):
-    def __init__(self, policy: pufferlib.models.Policy, foveated: bool = False, behavioral: bool = False, polar: bool = False):
+    def __init__(
+        self,
+        policy: pufferlib.models.Policy,
+        foveated: bool = False,
+        behavioral: bool = False,
+        polar: bool = False,
+        action_size: int = 5,
+    ):
         super().__init__()
         self.policy = policy
         self.field_nav_foveated = foveated
         self.field_nav_behavioral = behavioral
         self.field_nav_polar = polar
+        self.field_nav_action_size = action_size
 
     def forward(self, obs: torch.Tensor):
         state = self.policy.initial_state(obs.shape[0], device=obs.device)
@@ -67,6 +75,7 @@ class PufferPolicyAdapter(torch.nn.Module):
 
 def _infer_puffer_policy(state_dict: dict[str, torch.Tensor]) -> pufferlib.models.Policy:
     hidden_size = int(state_dict["decoder.value_function.weight"].shape[1])
+    action_size = int(state_dict["decoder.decoder.weight"].shape[0])
     map_linear = state_dict.get("encoder.map_encoder.8.weight")
     foveated = any(key.startswith("encoder.local_encoder.") for key in state_dict)
     polar = "encoder.map_encoder.1.weight" in state_dict and "encoder.global_encoder.0.weight" not in state_dict
@@ -117,11 +126,12 @@ def _infer_puffer_policy(state_dict: dict[str, torch.Tensor]) -> pufferlib.model
         obs_size = map_channels * 64 * 64 + 7
         encoder = encoder_cls(obs_size=obs_size, hidden_size=hidden_size, map_channels=map_channels, map_size=64)
     network = pufferlib.models.MLP(hidden_size=hidden_size, num_layers=num_layers)
-    decoder = pufferlib.models.DefaultDecoder([5], hidden_size=hidden_size)
+    decoder = pufferlib.models.DefaultDecoder([action_size], hidden_size=hidden_size)
     policy = pufferlib.models.Policy(encoder, decoder, network)
     policy.field_nav_foveated = foveated
     policy.field_nav_behavioral = behavioral
     policy.field_nav_polar = polar
+    policy.field_nav_action_size = action_size
     return policy
 
 
@@ -137,6 +147,7 @@ def load_policy(checkpoint_path: Path) -> torch.nn.Module:
             foveated=bool(getattr(policy, "field_nav_foveated", False)),
             behavioral=bool(getattr(policy, "field_nav_behavioral", False)),
             polar=bool(getattr(policy, "field_nav_polar", False)),
+            action_size=int(getattr(policy, "field_nav_action_size", 5)),
         )
 
     architecture = checkpoint.get("architecture", "mlp")
@@ -149,6 +160,7 @@ def load_policy(checkpoint_path: Path) -> torch.nn.Module:
     )
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    model.field_nav_action_size = int(checkpoint["act_dim"])
     return model
 
 
@@ -180,6 +192,7 @@ def run_episode(
         foveated_observation=bool(getattr(model, "field_nav_foveated", False)),
         behavioral_observation=bool(getattr(model, "field_nav_behavioral", False)),
         polar_observation=bool(getattr(model, "field_nav_polar", False)),
+        speed_control=int(getattr(model, "field_nav_action_size", 5)) > 5,
         reset_start_clearance_m=reset_start_clearance_m,
         reset_goal_clearance_m=reset_goal_clearance_m,
         reset_forward_clearance_m=reset_forward_clearance_m,
@@ -220,7 +233,7 @@ def run_episode(
         path_length_m = float(np.linalg.norm(np.diff(position_array, axis=0), axis=1).sum())
     else:
         path_length_m = 0.0
-    steering_values = [float(raw_env.steering_values[action]) for action in actions]
+    steering_values = [raw_env._decode_action(action)[0] for action in actions]
     mean_abs_steering = float(np.mean(np.abs(steering_values))) if steering_values else 0.0
     action_switches = int(sum(a != b for a, b in zip(actions, actions[1:])))
 
@@ -379,7 +392,7 @@ def save_gif(trace: EpisodeTrace, output_path: Path, fps: int, max_frames: int) 
         plt.close(fig)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    imageio.mimsave(output_path, frames, duration=1.0 / fps)
+    imageio.mimsave(output_path, frames, duration=1.0 / fps, loop=0)
 
 
 def trace_payload(trace: EpisodeTrace, rank: int | None = None) -> dict:

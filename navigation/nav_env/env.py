@@ -60,6 +60,12 @@ class FieldNavEnv(gym.Env):
         max_steps: int = 500,
         dt: float = 0.2,
         fixed_speed_mps: float = 1.0,
+        speed_control: bool = True,
+        min_speed_mps: float = 0.0,
+        max_speed_mps: float = 1.6,
+        acceleration_mps2: float = 1.5,
+        brake_deceleration_mps2: float = 2.5,
+        coast_deceleration_mps2: float = 0.3,
         max_turn_rate_rps: float = 1.0,
         num_obstacles_range: tuple[int, int] = (14, 40),
         obstacle_radius_range_m: tuple[float, float] = (0.35, 1.6),
@@ -99,6 +105,12 @@ class FieldNavEnv(gym.Env):
         self.max_steps = max_steps
         self.dt = dt
         self.fixed_speed_mps = fixed_speed_mps
+        self.speed_control = speed_control
+        self.min_speed_mps = min_speed_mps
+        self.max_speed_mps = max_speed_mps
+        self.acceleration_mps2 = acceleration_mps2
+        self.brake_deceleration_mps2 = brake_deceleration_mps2
+        self.coast_deceleration_mps2 = coast_deceleration_mps2
         self.max_turn_rate_rps = max_turn_rate_rps
         self.num_obstacles_range = num_obstacles_range
         self.obstacle_radius_range_m = obstacle_radius_range_m
@@ -127,6 +139,7 @@ class FieldNavEnv(gym.Env):
         self._steps = 0
 
         self.steering_values = np.array([-1.0, -0.5, 0.0, 0.5, 1.0], dtype=np.float32)
+        self.throttle_values = np.array([-1.0, 0.0, 1.0], dtype=np.float32)
 
         if self.polar_observation:
             self.observation_space = spaces.Dict(
@@ -194,7 +207,8 @@ class FieldNavEnv(gym.Env):
                     }
                 )
             )
-        self.action_space = spaces.Discrete(len(self.steering_values))
+        action_count = len(self.steering_values) * len(self.throttle_values) if self.speed_control else len(self.steering_values)
+        self.action_space = spaces.Discrete(action_count)
 
         self._rng = np.random.default_rng()
         self.robot = RobotState(0.0, 0.0, 0.0, 0.0, 0.0)
@@ -215,7 +229,7 @@ class FieldNavEnv(gym.Env):
             x=float(self._rng.uniform(-3.0, 3.0)),
             y=float(self._rng.uniform(-3.0, 3.0)),
             heading=float(self._rng.uniform(-np.pi, np.pi)),
-            speed=self.fixed_speed_mps,
+            speed=float(np.clip(self.fixed_speed_mps, self.min_speed_mps, self.max_speed_mps)),
             yaw_rate=0.0,
         )
 
@@ -260,12 +274,13 @@ class FieldNavEnv(gym.Env):
         return obs, info
 
     def step(self, action: int):
-        steering = float(self.steering_values[int(action)])
+        steering, throttle = self._decode_action(action)
+        speed = self._next_speed(throttle)
         self.robot = step_kinematics(
             self.robot,
             steering_cmd=steering,
             dt=self.dt,
-            speed=self.fixed_speed_mps,
+            speed=speed,
             max_turn_rate=self.max_turn_rate_rps,
         )
         self._steps += 1
@@ -313,6 +328,29 @@ class FieldNavEnv(gym.Env):
             self.render()
 
         return obs, reward, terminated, truncated, info
+
+    def _decode_action(self, action: int) -> tuple[float, float]:
+        action = int(np.clip(int(action), 0, self.action_space.n - 1))
+        if not self.speed_control:
+            return float(self.steering_values[action]), 0.0
+
+        throttle_count = len(self.throttle_values)
+        steering_idx = action // throttle_count
+        throttle_idx = action % throttle_count
+        return float(self.steering_values[steering_idx]), float(self.throttle_values[throttle_idx])
+
+    def _next_speed(self, throttle: float) -> float:
+        if not self.speed_control:
+            return self.fixed_speed_mps
+
+        speed = float(self.robot.speed)
+        if throttle > 0.0:
+            speed += self.acceleration_mps2 * self.dt
+        elif throttle < 0.0:
+            speed -= self.brake_deceleration_mps2 * self.dt
+        else:
+            speed -= self.coast_deceleration_mps2 * self.dt
+        return float(np.clip(speed, self.min_speed_mps, self.max_speed_mps))
 
     def render(self):
         dist = self._goal_distance()
@@ -439,7 +477,8 @@ class FieldNavEnv(gym.Env):
         if self.reset_forward_clearance_m <= 0.0:
             return True
 
-        sample_count = max(2, int(np.ceil(self.reset_forward_clearance_m / max(1e-6, self.fixed_speed_mps * self.dt))))
+        reset_speed = max(self.fixed_speed_mps, self.max_speed_mps if self.speed_control else self.fixed_speed_mps)
+        sample_count = max(2, int(np.ceil(self.reset_forward_clearance_m / max(1e-6, reset_speed * self.dt))))
         cos_h = float(np.cos(self.robot.heading))
         sin_h = float(np.sin(self.robot.heading))
         for idx in range(1, sample_count + 1):

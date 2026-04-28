@@ -13,7 +13,7 @@ class FieldNavVec:
     obs_dtype = "FloatTensor"
     obs_elem_size = 4
     num_atns = 1
-    act_sizes = [5]
+    act_sizes = [15]
     gpu = 0
 
     def __init__(self, args):
@@ -59,6 +59,11 @@ class FieldNavVec:
             "world_size_m",
             "dt",
             "fixed_speed_mps",
+            "min_speed_mps",
+            "max_speed_mps",
+            "acceleration_mps2",
+            "brake_deceleration_mps2",
+            "coast_deceleration_mps2",
             "max_turn_rate_rps",
             "min_goal_distance_m",
             "max_goal_distance_m",

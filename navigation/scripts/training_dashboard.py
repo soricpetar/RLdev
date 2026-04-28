@@ -6,14 +6,22 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CHECKPOINT_DIR = REPO_ROOT / "navigation/artifacts/native_checkpoints"
 DEFAULT_LOG_DIR = REPO_ROOT / "navigation/artifacts/native_logs"
+DEFAULT_ARTIFACTS_DIR = REPO_ROOT / "navigation/artifacts"
+DEFAULT_POLICY_OUT_DIR = REPO_ROOT / "navigation/artifacts/policy_viewer"
+
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from navigation.scripts import policy_viewer
 
 
 HTML = r"""<!doctype html>
@@ -91,6 +99,8 @@ canvas { display: block; width: 100%; height: 240px; }
 .runs th, .runs td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #2a3136; font-variant-numeric: tabular-nums; }
 .runs th { color: var(--muted); font-size: 12px; font-weight: 600; }
 .pill { display: inline-block; border-radius: 999px; padding: 2px 8px; background: var(--panel2); color: var(--muted); font-size: 12px; }
+.navlink { color: var(--cyan); text-decoration: none; border: 1px solid #344047; border-radius: 6px; padding: 6px 10px; }
+.navlink:hover { border-color: var(--cyan); }
 .live { color: var(--green); }
 .stale { color: var(--yellow); }
 .dead { color: var(--muted); }
@@ -106,7 +116,10 @@ canvas { display: block; width: 100%; height: 240px; }
     <h1>FieldNav Training Monitor</h1>
     <div class="sub" id="subtitle">Loading...</div>
   </div>
-  <div class="sub" id="updated">-</div>
+  <div style="display:flex; align-items:center; gap:12px;">
+    <a class="navlink" href="/policy">Policy Viewer</a>
+    <div class="sub" id="updated">-</div>
+  </div>
 </header>
 <main>
   <section class="grid stats">
@@ -535,6 +548,8 @@ class Handler(BaseHTTPRequestHandler):
     checkpoint_dir: Path
     log_dir: Path
     env: str
+    artifacts_dir: Path
+    policy_out_dir: Path
 
     def do_GET(self):
         parsed = urlparse(self.path)
@@ -542,9 +557,23 @@ class Handler(BaseHTTPRequestHandler):
             qs = parse_qs(parsed.query)
             env = qs.get("env", [self.env])[0]
             payload = collect_state(env, self.checkpoint_dir, self.log_dir)
-            body = json.dumps(payload).encode()
+            self.send_json(payload)
+            return
+
+        if parsed.path == "/api/policies":
+            policies = policy_viewer.load_policies(self.artifacts_dir)
+            self.send_json({"policies": policies, "out_dir": str(self.policy_out_dir)})
+            return
+
+        if parsed.path.startswith("/artifact/"):
+            rel = unquote(parsed.path[len("/artifact/") :])
+            self.send_file((REPO_ROOT / rel).resolve())
+            return
+
+        if parsed.path == "/policy":
+            body = policy_viewer.HTML.encode()
             self.send_response(200)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -553,6 +582,54 @@ class Handler(BaseHTTPRequestHandler):
         body = HTML.encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path != "/api/render":
+            self.send_error(404)
+            return
+
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(length) or b"{}")
+            result = policy_viewer.render_policy_payload(payload, self.policy_out_dir, self.artifacts_dir)
+            self.send_json(result)
+        except Exception as exc:
+            self.send_json({"error": str(exc)}, status=500)
+
+    def send_json(self, payload: dict, status: int = 200):
+        body = json.dumps(payload).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_file(self, path: Path):
+        root = REPO_ROOT.resolve()
+        try:
+            path.relative_to(root)
+        except ValueError:
+            self.send_error(403)
+            return
+        if not path.exists() or not path.is_file():
+            self.send_error(404)
+            return
+
+        content_type = "application/octet-stream"
+        if path.suffix == ".png":
+            content_type = "image/png"
+        elif path.suffix == ".gif":
+            content_type = "image/gif"
+        elif path.suffix == ".json":
+            content_type = "application/json"
+
+        body = path.read_bytes()
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -573,6 +650,8 @@ def main():
     parser.add_argument("--env", default="field_nav")
     parser.add_argument("--checkpoint-dir", type=Path, default=DEFAULT_CHECKPOINT_DIR)
     parser.add_argument("--log-dir", type=Path, default=DEFAULT_LOG_DIR)
+    parser.add_argument("--artifacts-dir", type=Path, default=DEFAULT_ARTIFACTS_DIR)
+    parser.add_argument("--policy-out-dir", type=Path, default=DEFAULT_POLICY_OUT_DIR)
     args = parser.parse_args()
 
     ts_ip = tailscale_ip()
@@ -582,6 +661,9 @@ def main():
     Handler.checkpoint_dir = args.checkpoint_dir
     Handler.log_dir = args.log_dir
     Handler.env = args.env
+    Handler.artifacts_dir = args.artifacts_dir
+    Handler.policy_out_dir = args.policy_out_dir
+    args.policy_out_dir.mkdir(parents=True, exist_ok=True)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"dashboard_url=http://{args.host}:{args.port}")
     print(f"local_url=http://127.0.0.1:{args.port}")
@@ -589,6 +671,9 @@ def main():
         print(f"tailscale_url=http://{ts_ip}:{args.port}")
     print(f"checkpoint_dir={args.checkpoint_dir}")
     print(f"log_dir={args.log_dir}")
+    print(f"policy_viewer_url=http://127.0.0.1:{args.port}/policy")
+    if ts_ip:
+        print(f"policy_viewer_tailscale_url=http://{ts_ip}:{args.port}/policy")
     server.serve_forever()
 
 

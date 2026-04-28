@@ -11,6 +11,11 @@ env:
   max_steps: 500
   dt: 0.2
   fixed_speed_mps: 1.0
+  min_speed_mps: 0.0
+  max_speed_mps: 1.6
+  acceleration_mps2: 1.5
+  brake_deceleration_mps2: 2.5
+  coast_deceleration_mps2: 0.3
   max_turn_rate_rps: 1.0
   num_obstacles_range: [14, 40]
   obstacle_radius_range_m: [0.35, 1.6]

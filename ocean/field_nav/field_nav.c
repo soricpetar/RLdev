@@ -22,6 +22,11 @@ int main(void) {
     env.world_size_m = 50.0f;
     env.dt = 0.2f;
     env.fixed_speed_mps = 1.0f;
+    env.min_speed_mps = 0.0f;
+    env.max_speed_mps = 1.6f;
+    env.acceleration_mps2 = 1.5f;
+    env.brake_deceleration_mps2 = 2.5f;
+    env.coast_deceleration_mps2 = 0.3f;
     env.max_turn_rate_rps = 1.0f;
     env.min_goal_distance_m = 10.0f;
     env.max_goal_distance_m = 22.0f;
@@ -46,7 +51,7 @@ int main(void) {
 
     c_reset(&env);
     for (int i = 0; i < 32; i++) {
-        env.actions[0] = (float)(i % 5);
+        env.actions[0] = (float)(i % 15);
         c_step(&env);
         if (env.terminals[0] > 0.5f) {
             printf("done reward=%.3f\n", env.rewards[0]);

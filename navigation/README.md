@@ -5,7 +5,7 @@ This directory contains a first implementation milestone for local navigation RL
 - `FieldNavEnv`: a 2D local-navigation environment with a robot-centered polar obstacle map,
   a compact goal vector, and robot state features.
 - Mixed scene objects: tree rows, bushes, potholes, moving people, and wall segments.
-- Discrete steering actions with fixed forward speed.
+- Discrete steering actions with optional brake/coast/accelerate speed control.
 - Reward composed of progress, goal completion, hard-object collision penalty,
   near-obstacle penalty, semantic contact/proximity penalties, steering smoothness,
   and a small time penalty.

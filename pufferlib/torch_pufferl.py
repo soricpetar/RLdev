@@ -190,6 +190,7 @@ class PuffeRL:
         self.last_log_time = time.time()
         self.start_time = time.time()
         self.profile = Profile(gpu=self.gpu)
+        self.replay_ratio_carry = 0.0
         self.verbose = verbose
 
         self.model_size = sum(p.numel() for p in policy.parameters() if p.requires_grad)
@@ -299,7 +300,16 @@ class PuffeRL:
 
         P = Profile
         prof.mark(0)
-        num_minibatches = int(config['replay_ratio'] * self.batch_size / config['minibatch_size'])
+        replay_ratio = float(config['replay_ratio'])
+        schedule_steps = int(config.get('replay_ratio_schedule_steps', 0) or 0)
+        if schedule_steps > 0:
+            start = float(config.get('replay_ratio_start', replay_ratio))
+            progress = min(1.0, self.global_step / max(1, schedule_steps))
+            replay_ratio = start + progress * (replay_ratio - start)
+
+        minibatches = replay_ratio * self.batch_size / config['minibatch_size'] + self.replay_ratio_carry
+        num_minibatches = max(1, int(minibatches))
+        self.replay_ratio_carry = minibatches - num_minibatches
         for mb in range(num_minibatches):
             shape = val.shape
             advantages = torch.zeros(shape, device=device)
@@ -372,6 +382,8 @@ class PuffeRL:
 
         losses = {k: v.item() / num_minibatches for k, v in losses.items()}
         losses['learning_rate'] = learning_rate
+        losses['replay_ratio'] = replay_ratio
+        losses['num_minibatches'] = num_minibatches
         y_pred = val.flatten()
         y_true = advantages.flatten() + val.flatten()
         var_y = y_true.var()
@@ -436,7 +448,21 @@ class PuffeRL:
 
         args['vec']['num_buffers'] = 1
         if args.get('backend') == 'python':
-            if args['env_name'] not in ('field_nav', 'fieldnav', 'field-nav'):
+            if args['env_name'] not in (
+                'field_nav',
+                'fieldnav',
+                'field-nav',
+                'field_nav_camera',
+                'fieldnav-camera',
+                'field_nav_camera_easy',
+                'fieldnav-camera-easy',
+                'field_nav_camera_bootstrap',
+                'fieldnav-camera-bootstrap',
+                'field_nav_camera_static_easy',
+                'fieldnav-camera-static-easy',
+                'field_nav_camera_static_medium',
+                'fieldnav-camera-static-medium',
+            ):
                 raise ValueError(f'No Python Puffer env registered for {args["env_name"]}')
             repo_dir = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
             if repo_dir not in os.sys.path:

@@ -39,28 +39,16 @@ COLLIDABLE_KINDS = {"tree", "wall", "person"}
 SEMANTIC_CHANNELS = ("hard_static", "soft_vegetation", "terrain_hazard", "dynamic_person", "wall")
 BEHAVIOR_CHANNELS = ("static_obstacle", "moving_obstacle", "soft_hazard")
 POLAR_CHANNELS = BEHAVIOR_CHANNELS
+SEMANTIC_CHANNEL_BY_KIND = {"tree": 0, "bush": 1, "pothole": 2, "person": 3, "wall": 4}
+BEHAVIOR_CHANNEL_BY_KIND = {"person": 1, "bush": 2, "pothole": 2}
 
 
 def semantic_channel(kind: str) -> int:
-    if kind == "tree":
-        return 0
-    if kind == "bush":
-        return 1
-    if kind == "pothole":
-        return 2
-    if kind == "person":
-        return 3
-    if kind == "wall":
-        return 4
-    return 0
+    return SEMANTIC_CHANNEL_BY_KIND.get(kind, 0)
 
 
 def behavior_channel(kind: str) -> int:
-    if kind == "person":
-        return 1
-    if kind in {"bush", "pothole"}:
-        return 2
-    return 0
+    return BEHAVIOR_CHANNEL_BY_KIND.get(kind, 0)
 
 
 def random_obstacles(
@@ -171,10 +159,37 @@ def point_segment_distance(px, py, x1, y1, x2, y2):
 def object_margin(x: float, y: float, obj: Object) -> float:
     if isinstance(obj, WallObstacle):
         d = point_segment_distance(x, y, obj.x1, obj.y1, obj.x2, obj.y2)
-        return float(d - obj.thickness * 0.5)
+        return float(d - 0.5 * obj.thickness)
 
     d = np.sqrt((x - obj.x) ** 2 + (y - obj.y) ** 2)
     return float(d - obj.radius)
+
+
+def object_margin_grid(wx: np.ndarray, wy: np.ndarray, obj: Object) -> np.ndarray:
+    if isinstance(obj, WallObstacle):
+        return point_segment_distance(wx, wy, obj.x1, obj.y1, obj.x2, obj.y2) - 0.5 * obj.thickness
+    return np.sqrt((wx - obj.x) ** 2 + (wy - obj.y) ** 2) - obj.radius
+
+
+def robot_grid(
+    robot_xyh: tuple[float, float, float],
+    map_size: int,
+    map_extent_m: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    rx, ry, heading = robot_xyh
+    grid = np.linspace(-0.5 * map_extent_m, 0.5 * map_extent_m, map_size, dtype=np.float32)
+    gx, gy = np.meshgrid(grid, grid, indexing="xy")
+    cos_h = np.cos(heading)
+    sin_h = np.sin(heading)
+    return rx + gx * cos_h - gy * sin_h, ry + gx * sin_h + gy * cos_h
+
+
+def paint_object(layer: np.ndarray, margin: np.ndarray, cost: float, inflation_radius_m: float) -> None:
+    layer[:] = np.maximum(layer, (margin <= 0).astype(np.float32) * cost)
+    inflated = (margin > 0) & (margin < inflation_radius_m)
+    if np.any(inflated):
+        inflated_cost = cost * (1.0 - margin / inflation_radius_m)
+        layer[:] = np.maximum(layer, np.clip(inflated_cost, 0.0, 1.0).astype(np.float32))
 
 
 def move_dynamic_objects(objects: list[Object], dt: float, world_size: float) -> None:
@@ -199,35 +214,10 @@ def obstacle_costmap(
     map_extent_m: float,
     inflation_radius_m: float,
 ) -> np.ndarray:
-    rx, ry, heading = robot_xyh
-
-    half = map_extent_m / 2.0
-    grid = np.linspace(-half, half, map_size, dtype=np.float32)
-    gx, gy = np.meshgrid(grid, grid, indexing="xy")
-
-    cos_h = np.cos(heading)
-    sin_h = np.sin(heading)
-
-    wx = rx + gx * cos_h - gy * sin_h
-    wy = ry + gx * sin_h + gy * cos_h
-
+    wx, wy = robot_grid(robot_xyh, map_size, map_extent_m)
     costmap = np.zeros((map_size, map_size), dtype=np.float32)
     for obs in obstacles:
-        if isinstance(obs, WallObstacle):
-            d = point_segment_distance(wx, wy, obs.x1, obs.y1, obs.x2, obs.y2)
-            margin = d - obs.thickness * 0.5
-        else:
-            d = np.sqrt((wx - obs.x) ** 2 + (wy - obs.y) ** 2)
-            margin = d - obs.radius
-        occupied = margin <= 0
-        inflated = (margin > 0) & (margin < inflation_radius_m)
-        cost = object_cost(obs.kind)
-
-        costmap = np.maximum(costmap, occupied.astype(np.float32) * cost)
-        if np.any(inflated):
-            inflated_cost = cost * (1.0 - (margin / inflation_radius_m))
-            costmap = np.maximum(costmap, np.clip(inflated_cost, 0.0, 1.0).astype(np.float32))
-
+        paint_object(costmap, object_margin_grid(wx, wy, obs), object_cost(obs.kind), inflation_radius_m)
     return costmap
 
 
@@ -238,38 +228,15 @@ def semantic_costmap(
     map_extent_m: float,
     inflation_radius_m: float,
 ) -> np.ndarray:
-    rx, ry, heading = robot_xyh
-
-    half = map_extent_m / 2.0
-    grid = np.linspace(-half, half, map_size, dtype=np.float32)
-    gx, gy = np.meshgrid(grid, grid, indexing="xy")
-
-    cos_h = np.cos(heading)
-    sin_h = np.sin(heading)
-
-    wx = rx + gx * cos_h - gy * sin_h
-    wy = ry + gx * sin_h + gy * cos_h
-
+    wx, wy = robot_grid(robot_xyh, map_size, map_extent_m)
     costmap = np.zeros((len(SEMANTIC_CHANNELS), map_size, map_size), dtype=np.float32)
     for obj in objects:
-        if isinstance(obj, WallObstacle):
-            d = point_segment_distance(wx, wy, obj.x1, obj.y1, obj.x2, obj.y2)
-            margin = d - obj.thickness * 0.5
-        else:
-            d = np.sqrt((wx - obj.x) ** 2 + (wy - obj.y) ** 2)
-            margin = d - obj.radius
-
-        occupied = margin <= 0
-        inflated = (margin > 0) & (margin < inflation_radius_m)
-        channel = semantic_channel(obj.kind)
-        cost = object_cost(obj.kind)
-
-        layer = costmap[channel]
-        layer[:] = np.maximum(layer, occupied.astype(np.float32) * cost)
-        if np.any(inflated):
-            inflated_cost = cost * (1.0 - (margin / inflation_radius_m))
-            layer[:] = np.maximum(layer, np.clip(inflated_cost, 0.0, 1.0).astype(np.float32))
-
+        paint_object(
+            costmap[semantic_channel(obj.kind)],
+            object_margin_grid(wx, wy, obj),
+            object_cost(obj.kind),
+            inflation_radius_m,
+        )
     return costmap
 
 
@@ -280,38 +247,15 @@ def behavioral_costmap(
     map_extent_m: float,
     inflation_radius_m: float,
 ) -> np.ndarray:
-    rx, ry, heading = robot_xyh
-
-    half = map_extent_m / 2.0
-    grid = np.linspace(-half, half, map_size, dtype=np.float32)
-    gx, gy = np.meshgrid(grid, grid, indexing="xy")
-
-    cos_h = np.cos(heading)
-    sin_h = np.sin(heading)
-
-    wx = rx + gx * cos_h - gy * sin_h
-    wy = ry + gx * sin_h + gy * cos_h
-
+    wx, wy = robot_grid(robot_xyh, map_size, map_extent_m)
     costmap = np.zeros((len(BEHAVIOR_CHANNELS), map_size, map_size), dtype=np.float32)
     for obj in objects:
-        if isinstance(obj, WallObstacle):
-            d = point_segment_distance(wx, wy, obj.x1, obj.y1, obj.x2, obj.y2)
-            margin = d - obj.thickness * 0.5
-        else:
-            d = np.sqrt((wx - obj.x) ** 2 + (wy - obj.y) ** 2)
-            margin = d - obj.radius
-
-        occupied = margin <= 0
-        inflated = (margin > 0) & (margin < inflation_radius_m)
-        channel = behavior_channel(obj.kind)
-        cost = object_cost(obj.kind)
-
-        layer = costmap[channel]
-        layer[:] = np.maximum(layer, occupied.astype(np.float32) * cost)
-        if np.any(inflated):
-            inflated_cost = cost * (1.0 - (margin / inflation_radius_m))
-            layer[:] = np.maximum(layer, np.clip(inflated_cost, 0.0, 1.0).astype(np.float32))
-
+        paint_object(
+            costmap[behavior_channel(obj.kind)],
+            object_margin_grid(wx, wy, obj),
+            object_cost(obj.kind),
+            inflation_radius_m,
+        )
     return costmap
 
 
@@ -406,6 +350,34 @@ def polar_costmap(
             mark_point(obj.x, obj.y, obj.kind, obj.radius)
 
     return map_
+
+
+def front_camera_polar_costmap(
+    robot_xyh: tuple[float, float, float],
+    objects: list[Object],
+    angle_bins: int,
+    distance_bins: int,
+    max_distance_m: float,
+    inflation_radius_m: float,
+    fov_deg: float,
+) -> np.ndarray:
+    visible = np.zeros(angle_bins, dtype=bool)
+    half_fov = np.deg2rad(fov_deg) * 0.5
+    bin_angles = -np.pi + (np.arange(angle_bins, dtype=np.float32) + 0.5) * (2.0 * np.pi / angle_bins)
+    visible[np.abs(bin_angles) <= half_fov] = True
+
+    full = polar_costmap(
+        robot_xyh,
+        objects,
+        angle_bins=angle_bins,
+        distance_bins=distance_bins,
+        max_distance_m=max_distance_m,
+        inflation_radius_m=inflation_radius_m,
+    )
+    front = np.zeros((len(POLAR_CHANNELS) + 1, angle_bins, distance_bins), dtype=np.float32)
+    front[: len(POLAR_CHANNELS), visible, :] = full[:, visible, :]
+    front[len(POLAR_CHANNELS), ~visible, :] = 1.0
+    return front
 
 
 def collision_distance(

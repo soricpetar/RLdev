@@ -13,8 +13,61 @@ class FieldNavVec:
     obs_dtype = "FloatTensor"
     obs_elem_size = 4
     num_atns = 1
-    act_sizes = [15]
     gpu = 0
+    int_keys = {
+        "map_size",
+        "local_map_size",
+        "global_map_size",
+        "polar_angle_bins",
+        "polar_distance_bins",
+        "max_steps",
+        "curriculum_warmup_steps",
+    }
+    float_keys = {
+        "map_extent_m",
+        "local_map_extent_m",
+        "global_map_extent_m",
+        "polar_max_distance_m",
+        "front_camera_fov_deg",
+        "heading_alignment_scale",
+        "goal_outside_fov_penalty",
+        "world_size_m",
+        "dt",
+        "fixed_speed_mps",
+        "min_speed_mps",
+        "max_speed_mps",
+        "acceleration_mps2",
+        "brake_deceleration_mps2",
+        "coast_deceleration_mps2",
+        "max_turn_rate_rps",
+        "min_goal_distance_m",
+        "max_goal_distance_m",
+        "goal_tolerance_m",
+        "robot_radius_m",
+        "inflation_radius_m",
+        "near_obstacle_threshold_m",
+        "reset_start_clearance_m",
+        "reset_goal_clearance_m",
+        "reset_forward_clearance_m",
+        "reset_forward_margin_m",
+    }
+    int_range_keys = {
+        "num_obstacles_range",
+        "tree_rows_range",
+        "bushes_range",
+        "potholes_range",
+        "people_range",
+        "walls_range",
+    }
+    float_range_keys = {"obstacle_radius_range_m"}
+    bool_keys = {
+        "polar_observation",
+        "front_camera_observation",
+        "speed_control",
+        "behavioral_observation",
+        "foveated_observation",
+        "curriculum_enabled",
+    }
 
     def __init__(self, args):
         vec_cfg = args["vec"]
@@ -30,6 +83,7 @@ class FieldNavVec:
 
         sample_obs, _ = self.envs[0].reset(seed=self.seed)
         self.obs_size = int(sample_obs.shape[0])
+        self.act_sizes = [int(self.envs[0].action_space.n)]
         self.observations = np.zeros((self.total_agents, self.obs_size), dtype=np.float32)
         self.rewards = np.zeros(self.total_agents, dtype=np.float32)
         self.terminals = np.zeros(self.total_agents, dtype=np.float32)
@@ -49,49 +103,14 @@ class FieldNavVec:
         return tuple(cast(v) for v in value)
 
     def _env_kwargs(self, cfg):
-        kwargs = {}
-        int_keys = {"map_size", "local_map_size", "global_map_size", "polar_angle_bins", "polar_distance_bins", "max_steps", "curriculum_warmup_steps"}
-        float_keys = {
-            "map_extent_m",
-            "local_map_extent_m",
-            "global_map_extent_m",
-            "polar_max_distance_m",
-            "world_size_m",
-            "dt",
-            "fixed_speed_mps",
-            "min_speed_mps",
-            "max_speed_mps",
-            "acceleration_mps2",
-            "brake_deceleration_mps2",
-            "coast_deceleration_mps2",
-            "max_turn_rate_rps",
-            "min_goal_distance_m",
-            "max_goal_distance_m",
-            "goal_tolerance_m",
-            "robot_radius_m",
-            "inflation_radius_m",
-            "near_obstacle_threshold_m",
-            "reset_start_clearance_m",
-            "reset_goal_clearance_m",
-            "reset_forward_clearance_m",
-            "reset_forward_margin_m",
+        converters = {
+            **dict.fromkeys(self.int_keys, int),
+            **dict.fromkeys(self.float_keys, float),
+            **dict.fromkeys(self.bool_keys, lambda value: str(value).lower() in {"1", "true", "yes", "on"}),
+            **dict.fromkeys(self.int_range_keys, lambda value: self._range(value, int)),
+            **dict.fromkeys(self.float_range_keys, lambda value: self._range(value, float)),
         }
-        int_range_keys = {"num_obstacles_range", "tree_rows_range", "bushes_range", "potholes_range", "people_range", "walls_range"}
-        float_range_keys = {"obstacle_radius_range_m"}
-        bool_keys = {"polar_observation", "behavioral_observation", "foveated_observation", "curriculum_enabled"}
-
-        for key, value in cfg.items():
-            if key in int_keys:
-                kwargs[key] = int(value)
-            elif key in float_keys:
-                kwargs[key] = float(value)
-            elif key in bool_keys:
-                kwargs[key] = str(value).lower() in {"1", "true", "yes", "on"}
-            elif key in int_range_keys:
-                kwargs[key] = self._range(value, int)
-            elif key in float_range_keys:
-                kwargs[key] = self._range(value, float)
-        return kwargs
+        return {key: converters[key](value) for key, value in cfg.items() if key in converters}
 
     @property
     def obs_ptr(self):
@@ -141,10 +160,15 @@ class FieldNavVec:
             self.observations[idx] = obs
 
     def log(self):
-        returns = np.asarray(self.finished_returns, dtype=np.float32)
-        lengths = np.asarray(self.finished_lengths, dtype=np.float32)
-        successes = np.asarray(self.finished_success, dtype=np.float32)
-        collisions = np.asarray(self.finished_collision, dtype=np.float32)
+        returns, lengths, successes, collisions = (
+            np.asarray(values, dtype=np.float32)
+            for values in (
+                self.finished_returns,
+                self.finished_lengths,
+                self.finished_success,
+                self.finished_collision,
+            )
+        )
         curriculum = np.asarray(
             [env.env._curriculum_progress() for env in self.envs],
             dtype=np.float32,

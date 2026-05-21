@@ -58,6 +58,8 @@ class PufferPolicyAdapter(torch.nn.Module):
         foveated: bool = False,
         behavioral: bool = False,
         polar: bool = False,
+        front_camera: bool = False,
+        map_channels: int = 3,
         action_size: int = 5,
     ):
         super().__init__()
@@ -65,6 +67,8 @@ class PufferPolicyAdapter(torch.nn.Module):
         self.field_nav_foveated = foveated
         self.field_nav_behavioral = behavioral
         self.field_nav_polar = polar
+        self.field_nav_front_camera = front_camera
+        self.field_nav_map_channels = map_channels
         self.field_nav_action_size = action_size
 
     def forward(self, obs: torch.Tensor):
@@ -80,7 +84,14 @@ def _infer_puffer_policy(state_dict: dict[str, torch.Tensor]) -> pufferlib.model
     foveated = any(key.startswith("encoder.local_encoder.") for key in state_dict)
     polar = "encoder.map_encoder.1.weight" in state_dict and "encoder.global_encoder.0.weight" not in state_dict
     first_conv = state_dict.get("encoder.map_encoder.0.weight")
-    map_channels = int(first_conv.shape[1]) if first_conv is not None else 5
+    polar_map = state_dict.get("encoder.map_encoder.1.weight")
+    if polar and polar_map is not None:
+        map_channels = int(polar_map.shape[1] // (32 * 16))
+    else:
+        map_channels = int(first_conv.shape[1]) if first_conv is not None else 5
+    vector_weight = state_dict.get("encoder.vector_encoder.0.weight")
+    vector_dim = int(vector_weight.shape[1]) if vector_weight is not None else 7
+    front_camera = bool(polar and map_channels == 4)
     behavioral = (not foveated) and (not polar) and map_channels == 3
 
     if foveated:
@@ -116,9 +127,9 @@ def _infer_puffer_policy(state_dict: dict[str, torch.Tensor]) -> pufferlib.model
         )
     elif polar:
         encoder = encoder_cls(
-            obs_size=3 * 32 * 16 + 7,
+            obs_size=map_channels * 32 * 16 + vector_dim,
             hidden_size=hidden_size,
-            map_channels=3,
+            map_channels=map_channels,
             polar_angle_bins=32,
             polar_distance_bins=16,
         )
@@ -131,6 +142,8 @@ def _infer_puffer_policy(state_dict: dict[str, torch.Tensor]) -> pufferlib.model
     policy.field_nav_foveated = foveated
     policy.field_nav_behavioral = behavioral
     policy.field_nav_polar = polar
+    policy.field_nav_front_camera = front_camera
+    policy.field_nav_map_channels = map_channels
     policy.field_nav_action_size = action_size
     return policy
 
@@ -147,6 +160,8 @@ def load_policy(checkpoint_path: Path) -> torch.nn.Module:
             foveated=bool(getattr(policy, "field_nav_foveated", False)),
             behavioral=bool(getattr(policy, "field_nav_behavioral", False)),
             polar=bool(getattr(policy, "field_nav_polar", False)),
+            front_camera=bool(getattr(policy, "field_nav_front_camera", False)),
+            map_channels=int(getattr(policy, "field_nav_map_channels", 3)),
             action_size=int(getattr(policy, "field_nav_action_size", 5)),
         )
 
@@ -161,6 +176,8 @@ def load_policy(checkpoint_path: Path) -> torch.nn.Module:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
     model.field_nav_action_size = int(checkpoint["act_dim"])
+    model.field_nav_map_channels = int(checkpoint.get("map_channels", 5))
+    model.field_nav_front_camera = False
     return model
 
 
@@ -182,21 +199,47 @@ def run_episode(
     model: torch.nn.Module,
     seed: int,
     max_steps: int,
+    front_camera_fov_deg: float = 100.0,
+    render_front_camera: bool | None = None,
+    hard_camera_env: bool = False,
     reset_start_clearance_m: float = 0.0,
     reset_goal_clearance_m: float = 0.0,
     reset_forward_clearance_m: float = 0.0,
     reset_forward_margin_m: float = 0.0,
 ) -> EpisodeTrace:
+    front_camera = bool(getattr(model, "field_nav_front_camera", False)) if render_front_camera is None else render_front_camera
+    hard_kwargs = {}
+    if hard_camera_env or front_camera:
+        hard_kwargs = {
+            "heading_alignment_scale": 0.06,
+            "goal_outside_fov_penalty": 0.02,
+            "polar_max_distance_m": 24.0,
+            "fixed_speed_mps": 1.0,
+            "max_speed_mps": 1.2,
+            "tree_rows_range": (2, 4),
+            "bushes_range": (6, 14),
+            "potholes_range": (4, 10),
+            "people_range": (2, 6),
+            "walls_range": (1, 4),
+            "min_goal_distance_m": 10.0,
+            "max_goal_distance_m": 22.0,
+            "goal_tolerance_m": 0.65,
+            "inflation_radius_m": 1.0,
+            "near_obstacle_threshold_m": 2.0,
+        }
     raw_env = FieldNavEnv(
         max_steps=max_steps,
+        front_camera_observation=front_camera,
+        front_camera_fov_deg=front_camera_fov_deg,
         foveated_observation=bool(getattr(model, "field_nav_foveated", False)),
         behavioral_observation=bool(getattr(model, "field_nav_behavioral", False)),
-        polar_observation=bool(getattr(model, "field_nav_polar", False)),
+        polar_observation=bool(getattr(model, "field_nav_polar", False)) and not front_camera,
         speed_control=int(getattr(model, "field_nav_action_size", 5)) > 5,
         reset_start_clearance_m=reset_start_clearance_m,
         reset_goal_clearance_m=reset_goal_clearance_m,
         reset_forward_clearance_m=reset_forward_clearance_m,
         reset_forward_margin_m=reset_forward_margin_m,
+        **hard_kwargs,
     )
     env = pufferlib.emulation.GymnasiumPufferEnv(raw_env)
     obs, info = env.reset(seed=seed)
@@ -268,7 +311,37 @@ def status_label(trace: EpisodeTrace) -> str:
     return "timeout/out"
 
 
-def draw_trace(ax, trace: EpisodeTrace, title: str, trail_until: int | None = None) -> None:
+def draw_camera_rays(ax, x: float, y: float, heading: float, fov_deg: float, max_distance_m: float) -> None:
+    half = np.deg2rad(fov_deg) * 0.5
+    ray_angles = np.linspace(-half, half, 9)
+    boundary = []
+    for rel in ray_angles:
+        angle = heading + rel
+        end_x = x + max_distance_m * np.cos(angle)
+        end_y = y + max_distance_m * np.sin(angle)
+        boundary.append((end_x, end_y))
+        ax.plot([x, end_x], [y, end_y], color="#f4bf50", alpha=0.22, linewidth=0.9, zorder=2)
+    wedge = plt.Polygon(
+        [(x, y), *boundary],
+        closed=True,
+        facecolor="#f4bf50",
+        edgecolor="#f4bf50",
+        alpha=0.10,
+        linewidth=1.0,
+        zorder=1,
+    )
+    ax.add_patch(wedge)
+
+
+def draw_trace(
+    ax,
+    trace: EpisodeTrace,
+    title: str,
+    trail_until: int | None = None,
+    show_camera_rays: bool = False,
+    front_camera_fov_deg: float = 100.0,
+    ray_distance_m: float = 24.0,
+) -> None:
     positions = np.asarray(trace.positions, dtype=np.float32)
     if trail_until is not None:
         trail_until = max(1, min(trail_until, len(positions)))
@@ -327,6 +400,15 @@ def draw_trace(ax, trace: EpisodeTrace, title: str, trail_until: int | None = No
 
     heading_idx = len(positions) - 1
     heading = trace.headings[min(heading_idx, len(trace.headings) - 1)]
+    if show_camera_rays:
+        draw_camera_rays(
+            ax,
+            float(positions[-1, 0]),
+            float(positions[-1, 1]),
+            float(heading),
+            front_camera_fov_deg,
+            ray_distance_m,
+        )
     ax.arrow(
         positions[-1, 0],
         positions[-1, 1],
@@ -344,7 +426,13 @@ def draw_trace(ax, trace: EpisodeTrace, title: str, trail_until: int | None = No
     ax.set_ylabel("y (m)")
 
 
-def save_grid(traces: list[EpisodeTrace], output_path: Path) -> None:
+def save_grid(
+    traces: list[EpisodeTrace],
+    output_path: Path,
+    show_camera_rays: bool = False,
+    front_camera_fov_deg: float = 100.0,
+    ray_distance_m: float = 24.0,
+) -> None:
     cols = min(3, len(traces))
     rows = int(np.ceil(len(traces) / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(5.2 * cols, 5.0 * rows), squeeze=False)
@@ -359,7 +447,14 @@ def save_grid(traces: list[EpisodeTrace], output_path: Path) -> None:
             f"return={trace.total_reward:.2f} steps={trace.steps} dist={trace.final_goal_distance:.2f}m\n"
             f"clearance={trace.min_clearance_m:.2f}m closest={trace.closest_obstacle_kind or 'none'}"
         )
-        draw_trace(ax, trace, title)
+        draw_trace(
+            ax,
+            trace,
+            title,
+            show_camera_rays=show_camera_rays,
+            front_camera_fov_deg=front_camera_fov_deg,
+            ray_distance_m=ray_distance_m,
+        )
 
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -374,7 +469,15 @@ def fig_to_image(fig) -> Image.Image:
     return Image.open(buffer).convert("RGB")
 
 
-def save_gif(trace: EpisodeTrace, output_path: Path, fps: int, max_frames: int) -> None:
+def save_gif(
+    trace: EpisodeTrace,
+    output_path: Path,
+    fps: int,
+    max_frames: int,
+    show_camera_rays: bool = False,
+    front_camera_fov_deg: float = 100.0,
+    ray_distance_m: float = 24.0,
+) -> None:
     num_points = len(trace.positions)
     frame_count = min(max_frames, max(2, num_points))
     frame_indices = np.unique(np.linspace(1, num_points, frame_count, dtype=int))
@@ -386,7 +489,15 @@ def save_gif(trace: EpisodeTrace, output_path: Path, fps: int, max_frames: int) 
             f"seed={trace.seed} {status_label(trace)} "
             f"return={trace.total_reward:.2f} step={idx - 1}/{trace.steps}"
         )
-        draw_trace(ax, trace, title, trail_until=int(idx))
+        draw_trace(
+            ax,
+            trace,
+            title,
+            trail_until=int(idx),
+            show_camera_rays=show_camera_rays,
+            front_camera_fov_deg=front_camera_fov_deg,
+            ray_distance_m=ray_distance_m,
+        )
         fig.tight_layout()
         frames.append(fig_to_image(fig))
         plt.close(fig)
@@ -477,6 +588,11 @@ def main() -> None:
     parser.add_argument("--top-k", type=int, default=6)
     parser.add_argument("--seed", type=int, default=1000)
     parser.add_argument("--max-steps", type=int, default=400)
+    parser.add_argument("--front-camera", action="store_true")
+    parser.add_argument("--front-camera-fov-deg", type=float, default=100.0)
+    parser.add_argument("--show-camera-rays", action="store_true")
+    parser.add_argument("--ray-distance-m", type=float, default=24.0)
+    parser.add_argument("--hard-camera-env", action="store_true")
     parser.add_argument("--reset-start-clearance-m", type=float, default=0.0)
     parser.add_argument("--reset-goal-clearance-m", type=float, default=0.0)
     parser.add_argument("--reset-forward-clearance-m", type=float, default=0.0)
@@ -488,11 +604,15 @@ def main() -> None:
         args.checkpoint = args.load_model_path
 
     model = load_policy(args.checkpoint)
+    inferred_front_camera = bool(getattr(model, "field_nav_front_camera", False))
     traces = [
         run_episode(
             model,
             args.seed + idx,
             args.max_steps,
+            front_camera_fov_deg=args.front_camera_fov_deg,
+            render_front_camera=args.front_camera or inferred_front_camera,
+            hard_camera_env=args.hard_camera_env or args.front_camera or inferred_front_camera,
             reset_start_clearance_m=args.reset_start_clearance_m,
             reset_goal_clearance_m=args.reset_goal_clearance_m,
             reset_forward_clearance_m=args.reset_forward_clearance_m,
@@ -511,11 +631,40 @@ def main() -> None:
     failure_gif_path = args.out_dir / "failure_policy_rollout.gif"
     summary_path = args.out_dir / "render_summary.json"
 
-    save_grid(top_traces, grid_path)
-    save_gif(top_traces[0], gif_path, fps=args.gif_fps, max_frames=args.gif_max_frames)
+    show_camera_rays = args.show_camera_rays or args.front_camera or inferred_front_camera
+    save_grid(
+        top_traces,
+        grid_path,
+        show_camera_rays=show_camera_rays,
+        front_camera_fov_deg=args.front_camera_fov_deg,
+        ray_distance_m=args.ray_distance_m,
+    )
+    save_gif(
+        top_traces[0],
+        gif_path,
+        fps=args.gif_fps,
+        max_frames=args.gif_max_frames,
+        show_camera_rays=show_camera_rays,
+        front_camera_fov_deg=args.front_camera_fov_deg,
+        ray_distance_m=args.ray_distance_m,
+    )
     if failure_traces:
-        save_grid(failure_traces, failure_grid_path)
-        save_gif(failure_traces[0], failure_gif_path, fps=args.gif_fps, max_frames=args.gif_max_frames)
+        save_grid(
+            failure_traces,
+            failure_grid_path,
+            show_camera_rays=show_camera_rays,
+            front_camera_fov_deg=args.front_camera_fov_deg,
+            ray_distance_m=args.ray_distance_m,
+        )
+        save_gif(
+            failure_traces[0],
+            failure_gif_path,
+            fps=args.gif_fps,
+            max_frames=args.gif_max_frames,
+            show_camera_rays=show_camera_rays,
+            front_camera_fov_deg=args.front_camera_fov_deg,
+            ray_distance_m=args.ray_distance_m,
+        )
     save_summary(traces, summary_path)
 
     print(f"saved_grid={grid_path}")

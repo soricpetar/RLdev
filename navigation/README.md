@@ -28,13 +28,75 @@ Training outputs:
 Remote monitoring over Tailscale:
 
 ```bash
-python navigation/scripts/training_dashboard.py \
+./.venv/bin/python navigation/scripts/training_dashboard.py \
   --tailscale \
-  --checkpoint-dir navigation/artifacts/native_checkpoints \
-  --log-dir navigation/artifacts/native_logs
+  --port 8769 \
+  --env field_nav_camera_native_hard \
+  --checkpoint-dir <current_checkpoint_dir> \
+  --log-dir <current_log_dir>
 ```
 
-Open the printed `tailscale_url` from a phone connected to the same Tailnet.
+Open the printed `tailscale_url` from another machine or phone connected to the
+same Tailnet. On this machine the usual remote dashboard URL is
+`http://100.120.184.115:8769`; the policy viewer is
+`http://100.120.184.115:8769/policy`.
+
+`--tailscale` makes the dashboard listen on `0.0.0.0` when the host was left at
+the default `127.0.0.1`, then prints both local and Tailscale URLs. If the port
+is already occupied, find and stop the old dashboard before restarting it:
+
+```bash
+lsof -nP -iTCP:8769 -sTCP:LISTEN
+kill <pid>
+```
+
+For RLdev navigation scripts, prefer `./.venv/bin/python`. The system Python on
+this machine may be too old for current repo imports.
+
+Current optimized native camera hard settings:
+
+- env: `field_nav_camera_native_hard`
+- narrow forward FOV: `100.0` degrees
+- agents/threads: `256` agents, `4` env threads
+- horizon/minibatch: `192` horizon, `49152` minibatch
+- replay schedule: `1.0 -> 2.0` over `15M` steps is stable; the best current
+  checkpoint came from a `1.0 -> 3.0` schedule over `20M` with mid-run
+  checkpoint selection
+- successful continuation LR: `2e-4`; the `1e-4` fine-tune regressed
+- expected SPS: `72K-75K` once replay ratio reaches `2.0`; early ramp can
+  exceed `100K`
+
+Current best 100-degree FOV hard native policy:
+
+```text
+navigation/artifacts/front_camera_native_stage13_hard_100fov_rr3_30m_checkpoints/field_nav_camera_native_hard/1778504318206/0000000024625152.bin
+```
+
+Fixed-seed 300-episode eval of this checkpoint: `92.00%` success, `8.00%`
+collision, mean return `32.84`. It beat Stage11 (`89.67%`) and the later
+Stage14-16 branches on the same seeds.
+
+Blocked-corridor curriculum knobs are available in `field_nav_camera_native_hard`
+and default to off:
+
+- `blocked_corridor_prob`
+- `blocked_corridor_wall_prob`
+- `blocked_corridor_min_distance_m`
+- `blocked_corridor_max_distance_m`
+- `blocked_corridor_min_half_width_m`
+- `blocked_corridor_max_half_width_m`
+
+The separate speed-control follow-up env is
+`field_nav_camera_native_hard_speed` with `15` actions. Keep it separate from
+the fixed-speed env because old `5`-action checkpoints are not decoder-compatible
+without an explicit transfer step.
+
+Current policy size:
+
+- total trainable params: `736,086`
+- dominant component: `encoder.map_encoder`, `524,544` params, about `71%`
+- MLP trunk: about `18%`
+- encoder projection: about `11%`
 
 `field_nav` is registered as a native Ocean/Puffer environment in
 `config/field_nav.ini` and implemented in `ocean/field_nav`. The current Puffer

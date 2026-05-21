@@ -29,6 +29,7 @@ from .maps import (
     obstacle_costmap,
     random_field_objects,
     random_obstacles,
+    front_camera_polar_costmap,
     polar_costmap,
     semantic_contact_penalty,
     semantic_costmap,
@@ -36,6 +37,18 @@ from .maps import (
 )
 from .rewards import RewardConfig, compute_reward
 from .robot import RobotState, step_kinematics, wrap_to_pi
+
+
+def _observation_space(entries: dict[str, tuple[int, ...]]):
+    def box(key: str, shape: tuple[int, ...]):
+        low = 0.0 if "costmap" in key else -1.0
+        return spaces.Box(low=low, high=1.0, shape=shape, dtype=np.float32)
+
+    return spaces.Dict(
+        OrderedDict(
+            (key, box(key, shape)) for key, shape in entries.items()
+        )
+    )
 
 
 class FieldNavEnv(gym.Env):
@@ -50,6 +63,10 @@ class FieldNavEnv(gym.Env):
         polar_angle_bins: int = 32,
         polar_distance_bins: int = 16,
         polar_max_distance_m: float = 24.0,
+        front_camera_observation: bool = False,
+        front_camera_fov_deg: float = 100.0,
+        heading_alignment_scale: float = 0.0,
+        goal_outside_fov_penalty: float = 0.0,
         behavioral_observation: bool = False,
         foveated_observation: bool = False,
         local_map_size: int = 32,
@@ -95,6 +112,10 @@ class FieldNavEnv(gym.Env):
         self.polar_angle_bins = polar_angle_bins
         self.polar_distance_bins = polar_distance_bins
         self.polar_max_distance_m = polar_max_distance_m
+        self.front_camera_observation = front_camera_observation
+        self.front_camera_fov_deg = front_camera_fov_deg
+        self.heading_alignment_scale = heading_alignment_scale
+        self.goal_outside_fov_penalty = goal_outside_fov_penalty
         self.behavioral_observation = behavioral_observation
         self.foveated_observation = foveated_observation
         self.local_map_size = local_map_size
@@ -141,72 +162,20 @@ class FieldNavEnv(gym.Env):
         self.steering_values = np.array([-1.0, -0.5, 0.0, 0.5, 1.0], dtype=np.float32)
         self.throttle_values = np.array([-1.0, 0.0, 1.0], dtype=np.float32)
 
-        if self.polar_observation:
-            self.observation_space = spaces.Dict(
-                OrderedDict(
-                    {
-                        "costmap": spaces.Box(
-                            low=0.0,
-                            high=1.0,
-                            shape=(len(BEHAVIOR_CHANNELS), polar_angle_bins, polar_distance_bins),
-                            dtype=np.float32,
-                        ),
-                        "goal": spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                        "state": spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
-                    }
-                )
-            )
+        if self.front_camera_observation:
+            obs_shapes = {"costmap": (len(BEHAVIOR_CHANNELS) + 1, polar_angle_bins, polar_distance_bins)}
+        elif self.polar_observation:
+            obs_shapes = {"costmap": (len(BEHAVIOR_CHANNELS), polar_angle_bins, polar_distance_bins)}
         elif self.foveated_observation:
-            self.observation_space = spaces.Dict(
-                OrderedDict(
-                    {
-                        "local_costmap": spaces.Box(
-                            low=0.0,
-                            high=1.0,
-                            shape=(len(BEHAVIOR_CHANNELS), local_map_size, local_map_size),
-                            dtype=np.float32,
-                        ),
-                        "global_costmap": spaces.Box(
-                            low=0.0,
-                            high=1.0,
-                            shape=(len(BEHAVIOR_CHANNELS), global_map_size, global_map_size),
-                            dtype=np.float32,
-                        ),
-                        "goal": spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                        "state": spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
-                    }
-                )
-            )
+            obs_shapes = {
+                "local_costmap": (len(BEHAVIOR_CHANNELS), local_map_size, local_map_size),
+                "global_costmap": (len(BEHAVIOR_CHANNELS), global_map_size, global_map_size),
+            }
         elif self.behavioral_observation:
-            self.observation_space = spaces.Dict(
-                OrderedDict(
-                    {
-                        "costmap": spaces.Box(
-                            low=0.0,
-                            high=1.0,
-                            shape=(len(BEHAVIOR_CHANNELS), map_size, map_size),
-                            dtype=np.float32,
-                        ),
-                        "goal": spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                        "state": spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
-                    }
-                )
-            )
+            obs_shapes = {"costmap": (len(BEHAVIOR_CHANNELS), map_size, map_size)}
         else:
-            self.observation_space = spaces.Dict(
-                OrderedDict(
-                    {
-                        "costmap": spaces.Box(
-                            low=0.0,
-                            high=1.0,
-                            shape=(len(self.costmap_channels), map_size, map_size),
-                            dtype=np.float32,
-                        ),
-                        "goal": spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32),
-                        "state": spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32),
-                    }
-                )
-            )
+            obs_shapes = {"costmap": (len(self.costmap_channels), map_size, map_size)}
+        self.observation_space = _observation_space(obs_shapes | {"goal": (3,), "state": (4,)})
         action_count = len(self.steering_values) * len(self.throttle_values) if self.speed_control else len(self.steering_values)
         self.action_space = spaces.Discrete(action_count)
 
@@ -312,6 +281,7 @@ class FieldNavEnv(gym.Env):
             cfg=self.reward_cfg,
         )
         reward -= semantic_penalty
+        reward += self._partial_observation_reward()
         self.object_contact = object_contact
         self._prev_steering = steering
 
@@ -330,13 +300,11 @@ class FieldNavEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
     def _decode_action(self, action: int) -> tuple[float, float]:
-        action = int(np.clip(int(action), 0, self.action_space.n - 1))
         if not self.speed_control:
             return float(self.steering_values[action]), 0.0
 
         throttle_count = len(self.throttle_values)
-        steering_idx = action // throttle_count
-        throttle_idx = action % throttle_count
+        steering_idx, throttle_idx = divmod(int(action), throttle_count)
         return float(self.steering_values[steering_idx]), float(self.throttle_values[throttle_idx])
 
     def _next_speed(self, throttle: float) -> float:
@@ -361,7 +329,11 @@ class FieldNavEnv(gym.Env):
         )
 
     def _goal_distance(self) -> float:
-        return float(np.linalg.norm(self.goal_xy - np.array([self.robot.x, self.robot.y], dtype=np.float32)))
+        return float(np.linalg.norm(self.goal_xy - self.robot_xy))
+
+    @property
+    def robot_xy(self) -> np.ndarray:
+        return np.array([self.robot.x, self.robot.y], dtype=np.float32)
 
     def _curriculum_progress(self) -> float:
         if not self.curriculum_enabled or self.curriculum_warmup_steps <= 0:
@@ -382,11 +354,25 @@ class FieldNavEnv(gym.Env):
         dx = self.goal_xy[0] - self.robot.x
         dy = self.goal_xy[1] - self.robot.y
         dist = float(np.sqrt(dx * dx + dy * dy))
-        goal_heading = np.arctan2(dy, dx)
-        heading_error = wrap_to_pi(goal_heading - self.robot.heading)
+        heading_error = self._goal_heading_error()
 
         dist_norm = np.clip(dist / 25.0, 0.0, 1.0)
         return np.array([dist_norm, np.sin(heading_error), np.cos(heading_error)], dtype=np.float32)
+
+    def _goal_heading_error(self) -> float:
+        dx = self.goal_xy[0] - self.robot.x
+        dy = self.goal_xy[1] - self.robot.y
+        return float(wrap_to_pi(np.arctan2(dy, dx) - self.robot.heading))
+
+    def _partial_observation_reward(self) -> float:
+        heading_error = self._goal_heading_error()
+        reward = self.heading_alignment_scale * float(np.cos(heading_error))
+        if self.front_camera_observation and self.goal_outside_fov_penalty > 0.0:
+            half_fov = 0.5 * np.deg2rad(self.front_camera_fov_deg)
+            if abs(heading_error) > half_fov:
+                speed_norm = self.robot.speed / max(1e-6, self.max_speed_mps)
+                reward -= self.goal_outside_fov_penalty * float(np.clip(speed_norm, 0.0, 1.0))
+        return reward
 
     def _state_features(self) -> np.ndarray:
         return np.array(
@@ -400,23 +386,35 @@ class FieldNavEnv(gym.Env):
         )
 
     def _observation(self) -> dict[str, np.ndarray]:
-        if self.polar_observation:
-            return {
-                "costmap": polar_costmap(
-                    (self.robot.x, self.robot.y, self.robot.heading),
+        robot_xyh = (self.robot.x, self.robot.y, self.robot.heading)
+        base = {"goal": self._goal_features(), "state": self._state_features()}
+        if self.front_camera_observation:
+            return base | {
+                "costmap": front_camera_polar_costmap(
+                    robot_xyh,
                     self.obstacles,
                     angle_bins=self.polar_angle_bins,
                     distance_bins=self.polar_distance_bins,
                     max_distance_m=self.polar_max_distance_m,
                     inflation_radius_m=self.inflation_radius_m,
-                ),
-                "goal": self._goal_features(),
-                "state": self._state_features(),
+                    fov_deg=self.front_camera_fov_deg,
+                )
+            }
+
+        if self.polar_observation:
+            return base | {
+                "costmap": polar_costmap(
+                    robot_xyh,
+                    self.obstacles,
+                    angle_bins=self.polar_angle_bins,
+                    distance_bins=self.polar_distance_bins,
+                    max_distance_m=self.polar_max_distance_m,
+                    inflation_radius_m=self.inflation_radius_m,
+                )
             }
 
         if self.foveated_observation:
-            robot_xyh = (self.robot.x, self.robot.y, self.robot.heading)
-            return {
+            return base | {
                 "local_costmap": behavioral_costmap(
                     robot_xyh,
                     self.obstacles,
@@ -431,33 +429,27 @@ class FieldNavEnv(gym.Env):
                     map_extent_m=self.global_map_extent_m,
                     inflation_radius_m=self.inflation_radius_m,
                 ),
-                "goal": self._goal_features(),
-                "state": self._state_features(),
             }
 
         if self.behavioral_observation:
-            return {
+            return base | {
                 "costmap": behavioral_costmap(
-                    (self.robot.x, self.robot.y, self.robot.heading),
+                    robot_xyh,
                     self.obstacles,
                     map_size=self.map_size,
                     map_extent_m=self.map_extent_m,
                     inflation_radius_m=self.inflation_radius_m,
-                ),
-                "goal": self._goal_features(),
-                "state": self._state_features(),
+                )
             }
 
-        return {
+        return base | {
             "costmap": semantic_costmap(
-                (self.robot.x, self.robot.y, self.robot.heading),
+                robot_xyh,
                 self.obstacles,
                 map_size=self.map_size,
                 map_extent_m=self.map_extent_m,
                 inflation_radius_m=self.inflation_radius_m,
-            ),
-            "goal": self._goal_features(),
-            "state": self._state_features(),
+            )
         }
 
     def _out_of_bounds(self) -> bool:
@@ -465,13 +457,12 @@ class FieldNavEnv(gym.Env):
         return abs(self.robot.x) > half or abs(self.robot.y) > half
 
     def _point_collidable_clearance(self, x: float, y: float) -> float:
-        min_clearance = np.inf
-        for obstacle in self.obstacles:
-            if obstacle.kind not in COLLIDABLE_KINDS:
-                continue
-            clearance = object_margin(x, y, obstacle) - self.robot_radius_m
-            min_clearance = min(min_clearance, clearance)
-        return float(min_clearance)
+        clearances = (
+            object_margin(x, y, obstacle) - self.robot_radius_m
+            for obstacle in self.obstacles
+            if obstacle.kind in COLLIDABLE_KINDS
+        )
+        return float(min(clearances, default=np.inf))
 
     def _forward_path_clear(self) -> bool:
         if self.reset_forward_clearance_m <= 0.0:
@@ -490,22 +481,14 @@ class FieldNavEnv(gym.Env):
         return True
 
     def _reset_layout_valid(self) -> bool:
-        if (
-            self.reset_start_clearance_m > 0.0
-            and self._point_collidable_clearance(self.robot.x, self.robot.y) < self.reset_start_clearance_m
-        ):
-            return False
-        if (
-            self.reset_goal_clearance_m > 0.0
-            and self._point_collidable_clearance(float(self.goal_xy[0]), float(self.goal_xy[1])) < self.reset_goal_clearance_m
-        ):
-            return False
-        return self._forward_path_clear()
+        start_ok = self._point_collidable_clearance(self.robot.x, self.robot.y) >= self.reset_start_clearance_m
+        goal_ok = self._point_collidable_clearance(*self.goal_xy) >= self.reset_goal_clearance_m
+        return start_ok and goal_ok and self._forward_path_clear()
 
     def _sample_goal_far_from_robot(self, min_dist: float, max_dist: float) -> np.ndarray:
         for _ in range(200):
             gx, gy = self._rng.uniform(-self.world_size_m * 0.4, self.world_size_m * 0.4, size=2)
-            d = np.linalg.norm(np.array([gx - self.robot.x, gy - self.robot.y]))
+            d = np.linalg.norm(np.array([gx, gy]) - self.robot_xy)
             if min_dist <= d <= max_dist:
                 return np.array([gx, gy], dtype=np.float32)
 

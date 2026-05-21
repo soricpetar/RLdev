@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FieldNav Policy Viewer</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #101214;
+  --panel: #181c1f;
+  --panel2: #20262a;
+  --line: #303940;
+  --text: #e8ecef;
+  --muted: #9aa8b2;
+  --green: #42d392;
+  --red: #ff6b6b;
+  --blue: #6ea8fe;
+  --yellow: #f4bf50;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+header {
+  padding: 18px 22px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+h1 { margin: 0; font-size: 18px; }
+main { padding: 18px 22px 28px; }
+.sub { color: var(--muted); font-size: 12px; }
+.layout { display: grid; grid-template-columns: 380px 1fr; gap: 16px; align-items: start; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 14px;
+  min-width: 0;
+}
+label { display: block; color: var(--muted); font-size: 12px; margin: 10px 0 5px; }
+select, input {
+  width: 100%;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid #3a454d;
+  border-radius: 6px;
+  padding: 8px 9px;
+}
+input[type="checkbox"] { width: auto; margin-right: 8px; }
+button {
+  width: 100%;
+  margin-top: 14px;
+  border: 1px solid #3a454d;
+  border-radius: 6px;
+  padding: 9px 10px;
+  color: var(--text);
+  background: var(--blue);
+  cursor: pointer;
+  font-weight: 700;
+}
+button:disabled { opacity: 0.5; cursor: wait; }
+.grid { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)); gap: 10px; margin-bottom: 14px; }
+.metric { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+.metric .k { color: var(--muted); font-size: 12px; }
+.metric .v { font-size: 22px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.images { display: grid; grid-template-columns: 1fr; gap: 14px; }
+.image-row { display: grid; grid-template-columns: repeat(2, minmax(260px, 1fr)); gap: 14px; }
+img {
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: #0b0d0f;
+}
+.path {
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+  margin-top: 8px;
+}
+.status { color: var(--yellow); min-height: 20px; }
+pre {
+  margin: 0;
+  max-height: 380px;
+  overflow: auto;
+  color: #cbd5df;
+  background: #0c0f11;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 12px;
+  font-size: 12px;
+}
+@media (max-width: 1000px) {
+  .layout { grid-template-columns: 1fr; }
+  .grid { grid-template-columns: repeat(2, minmax(110px, 1fr)); }
+  .image-row { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>FieldNav Policy Viewer</h1>
+    <div class="sub">Render checkpoints on fixed seeds and inspect successes/failures.</div>
+  </div>
+  <div class="sub" id="serverInfo">Loading...</div>
+</header>
+<main class="layout">
+  <section class="card">
+    <label for="policy">Policy</label>
+    <select id="policy"></select>
+    <div class="path" id="checkpointPath"></div>
+
+    <label for="episodes">Episodes</label>
+    <input id="episodes" type="number" min="1" max="1000" value="80">
+
+    <label for="seed">Seed</label>
+    <input id="seed" type="number" value="300000">
+
+    <label for="topK">Rollouts to show</label>
+    <input id="topK" type="number" min="1" max="12" value="6">
+
+    <label for="maxSteps">Max steps</label>
+    <input id="maxSteps" type="number" min="10" max="1000" value="400">
+
+    <label><input id="clearance" type="checkbox" checked>Use reset clearance</label>
+
+    <button id="run">Render Policy</button>
+    <div class="path status" id="status"></div>
+  </section>
+
+  <section>
+    <div class="grid">
+      <div class="metric"><div class="k">Success</div><div class="v" id="success">-</div></div>
+      <div class="metric"><div class="k">Collision</div><div class="v" id="collision">-</div></div>
+      <div class="metric"><div class="k">Timeout</div><div class="v" id="timeout">-</div></div>
+      <div class="metric"><div class="k">Mean Return</div><div class="v" id="return">-</div></div>
+      <div class="metric"><div class="k">Episodes</div><div class="v" id="episodeCount">-</div></div>
+    </div>
+    <div class="images">
+      <div class="image-row">
+        <div class="card">
+          <div class="sub">Top Rollouts</div>
+          <img id="topImage" alt="Top rollouts">
+        </div>
+        <div class="card">
+          <div class="sub">Failure Rollouts</div>
+          <img id="failureImage" alt="Failure rollouts">
+        </div>
+      </div>
+      <div class="image-row">
+        <div class="card">
+          <div class="sub">Best Rollout GIF</div>
+          <img id="bestGif" alt="Best rollout">
+        </div>
+        <div class="card">
+          <div class="sub">Failure GIF</div>
+          <img id="failureGif" alt="Failure rollout">
+        </div>
+      </div>
+      <div class="card">
+        <div class="sub">Summary JSON</div>
+        <pre id="summary">{}</pre>
+      </div>
+    </div>
+  </section>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+const pct = v => Number.isFinite(v) ? `${(100 * v).toFixed(1)}%` : '-';
+const num = v => Number.isFinite(v) ? v.toFixed(2) : '-';
+let policies = [];
+
+function selectedPolicy() {
+  return policies.find(p => p.id === $('policy').value);
+}
+
+function setStatus(text) {
+  $('status').textContent = text;
+}
+
+function setImage(id, url) {
+  const img = $(id);
+  if (!url) {
+    img.removeAttribute('src');
+    return;
+  }
+  img.src = `${url}?t=${Date.now()}`;
+}
+
+async function loadPolicies() {
+  const res = await fetch('/api/policies');
+  const data = await res.json();
+  policies = data.policies || [];
+  $('serverInfo').textContent = data.out_dir || '';
+  $('policy').innerHTML = policies.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+  updatePolicyPath();
+}
+
+function updatePolicyPath() {
+  const p = selectedPolicy();
+  $('checkpointPath').textContent = p ? p.path : '';
+}
+
+async function runRender() {
+  const p = selectedPolicy();
+  if (!p) return;
+  $('run').disabled = true;
+  setStatus('Rendering...');
+  try {
+    const payload = {
+      policy_id: p.id,
+      episodes: Number($('episodes').value),
+      seed: Number($('seed').value),
+      top_k: Number($('topK').value),
+      max_steps: Number($('maxSteps').value),
+      reset_clearance: $('clearance').checked,
+    };
+    const res = await fetch('/api/render', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (!res.ok || data.error) throw new Error(data.error || `HTTP ${res.status}`);
+    const s = data.summary || {};
+    $('success').textContent = pct(s.success_rate);
+    $('collision').textContent = pct(s.collision_rate);
+    $('timeout').textContent = pct(s.timeout_rate);
+    $('return').textContent = num(s.mean_return);
+    $('episodeCount').textContent = s.episodes ?? '-';
+    $('summary').textContent = JSON.stringify(s, null, 2);
+    setImage('topImage', data.assets?.top_grid);
+    setImage('failureImage', data.assets?.failure_grid);
+    setImage('bestGif', data.assets?.best_gif);
+    setImage('failureGif', data.assets?.failure_gif);
+    setStatus(`Rendered in ${data.elapsed_s.toFixed(1)}s: ${data.out_dir}`);
+  } catch (err) {
+    setStatus(String(err.message || err));
+  } finally {
+    $('run').disabled = false;
+  }
+}
+
+$('policy').addEventListener('change', updatePolicyPath);
+$('run').addEventListener('click', runRender);
+loadPolicies().catch(err => setStatus(String(err)));
+</script>
+</body>
+</html>

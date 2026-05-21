@@ -1,0 +1,372 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FieldNav Training Monitor</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #101214;
+  --panel: #181c1f;
+  --panel2: #20262a;
+  --text: #e8ecef;
+  --muted: #9aa8b2;
+  --cyan: #24d6d6;
+  --green: #42d392;
+  --red: #ff6b6b;
+  --yellow: #f4bf50;
+  --blue: #6ea8fe;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px;
+  border-bottom: 1px solid #2b3338;
+}
+h1 { margin: 0; font-size: 18px; font-weight: 700; }
+.sub { color: var(--muted); font-size: 12px; }
+main { padding: 18px 22px 28px; }
+.grid { display: grid; gap: 14px; }
+.stats { grid-template-columns: repeat(6, minmax(120px, 1fr)); }
+.charts { grid-template-columns: repeat(2, minmax(280px, 1fr)); margin-top: 14px; }
+.wide { grid-column: 1 / -1; }
+.card {
+  background: var(--panel);
+  border: 1px solid #2a3136;
+  border-radius: 8px;
+  padding: 14px;
+  min-width: 0;
+}
+.metric-label { color: var(--muted); font-size: 12px; margin-bottom: 4px; white-space: nowrap; }
+.metric-value { font-size: 22px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.metric-small { color: var(--muted); font-size: 12px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.controls label { color: var(--muted); font-size: 12px; }
+.controls button {
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid #344047;
+  border-radius: 6px;
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.controls button:hover { border-color: var(--cyan); }
+.controls input[type="range"] { width: 160px; }
+canvas { display: block; width: 100%; height: 240px; }
+.runs { width: 100%; border-collapse: collapse; margin-top: 6px; }
+.runs th, .runs td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #2a3136; font-variant-numeric: tabular-nums; }
+.runs th { color: var(--muted); font-size: 12px; font-weight: 600; }
+.pill { display: inline-block; border-radius: 999px; padding: 2px 8px; background: var(--panel2); color: var(--muted); font-size: 12px; }
+.navlink { color: var(--cyan); text-decoration: none; border: 1px solid #344047; border-radius: 6px; padding: 6px 10px; }
+.navlink:hover { border-color: var(--cyan); }
+.live { color: var(--green); }
+.stale { color: var(--yellow); }
+.dead { color: var(--muted); }
+@media (max-width: 1000px) {
+  .stats { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
+  .charts { grid-template-columns: 1fr; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>FieldNav Training Monitor</h1>
+    <div class="sub" id="subtitle">Loading...</div>
+  </div>
+  <div style="display:flex; align-items:center; gap:12px;">
+    <a class="navlink" href="/policy">Policy Viewer</a>
+    <div class="sub" id="updated">-</div>
+  </div>
+</header>
+<main>
+  <section class="grid stats">
+    <div class="card"><div class="metric-label">Run</div><div class="metric-value" id="run">-</div><div class="metric-small" id="stage">-</div></div>
+    <div class="card"><div class="metric-label">Steps</div><div class="metric-value" id="steps">-</div><div class="metric-small" id="progress">-</div></div>
+    <div class="card"><div class="metric-label">SPS</div><div class="metric-value" id="sps">-</div><div class="metric-small" id="eta">-</div></div>
+    <div class="card"><div class="metric-label">Success</div><div class="metric-value" id="success">-</div><div class="metric-small">goal reached episodes</div></div>
+    <div class="card"><div class="metric-label">Collision</div><div class="metric-value" id="collision">-</div><div class="metric-small">collision episodes</div></div>
+    <div class="card"><div class="metric-label">Return</div><div class="metric-value" id="score">-</div><div class="metric-small" id="epLen">-</div></div>
+  </section>
+  <section class="card controls">
+    <button id="zoomIn" type="button">Zoom in</button>
+    <button id="zoomOut" type="button">Zoom out</button>
+    <button id="zoomAll" type="button">All</button>
+    <label>Window <span id="windowLabel">100%</span></label>
+    <input id="windowRange" type="range" min="5" max="100" step="5" value="100">
+    <label>Moving avg <span id="smoothLabel">1</span></label>
+    <input id="smoothRange" type="range" min="1" max="100" step="1" value="1">
+  </section>
+  <section class="card" style="margin-bottom:14px;">
+    <div class="metric-label">Current Experiment</div>
+    <div class="metric-value" id="experimentName" style="font-size:16px;">-</div>
+    <div class="sub" id="experimentDescription" style="margin-top:6px; max-width:1100px;">-</div>
+  </section>
+  <section class="grid charts">
+    <div class="card"><canvas id="quality"></canvas></div>
+    <div class="card"><canvas id="return"></canvas></div>
+    <div class="card"><canvas id="loss"></canvas></div>
+    <div class="card"><canvas id="speed"></canvas></div>
+    <div class="card wide">
+      <div class="metric-label">Runs and Checkpoints</div>
+      <table class="runs">
+        <thead><tr><th>Run</th><th>Status</th><th>Latest Step</th><th>Checkpoints</th><th>Updated</th><th>Path</th></tr></thead>
+        <tbody id="runs"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<script>
+const fmt = new Intl.NumberFormat(undefined, {maximumFractionDigits: 1});
+const pct = v => Number.isFinite(v) ? `${(100*v).toFixed(1)}%` : '-';
+const num = v => Number.isFinite(v) ? fmt.format(v) : '-';
+const short = s => s ? String(s).slice(-6) : '-';
+let viewPct = 100;
+let smoothWindow = 1;
+
+function get(obj, key) {
+  if (!obj) return undefined;
+  return obj[key];
+}
+
+function series(history, key) {
+  return (history || []).map(p => [Number(p.agent_steps ?? p.steps ?? 0), Number(p[key])]).filter(p => Number.isFinite(p[1]));
+}
+
+function seriesMap(history, key, fn) {
+  return series(history, key).map(p => [p[0], fn(p[1])]).filter(p => Number.isFinite(p[1]));
+}
+
+function visibleSeries(data) {
+  if (!data.length || viewPct >= 100) return data;
+  const keep = Math.max(2, Math.ceil(data.length * viewPct / 100));
+  return data.slice(-keep);
+}
+
+function smoothSeries(data) {
+  if (smoothWindow <= 1 || data.length < 3) return data;
+  const out = [];
+  let sum = 0;
+  const q = [];
+  for (const point of data) {
+    q.push(point[1]);
+    sum += point[1];
+    if (q.length > smoothWindow) sum -= q.shift();
+    out.push([point[0], sum / q.length]);
+  }
+  return out;
+}
+
+function transformSeries(data) {
+  return smoothSeries(visibleSeries(data));
+}
+
+function rollingBestSeries(data, mode) {
+  if (!data.length) return [];
+  const out = [];
+  let best = data[0][1];
+  for (const point of data) {
+    best = mode === 'min' ? Math.min(best, point[1]) : Math.max(best, point[1]);
+    out.push([point[0], best]);
+  }
+  return visibleSeries(out);
+}
+
+function drawChart(canvas, title, lines) {
+  const ctx = canvas.getContext('2d');
+  const dpr = window.devicePixelRatio || 1;
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.max(320, rect.width * dpr);
+  canvas.height = Math.max(220, rect.height * dpr);
+  ctx.scale(dpr, dpr);
+  const w = canvas.width / dpr, h = canvas.height / dpr;
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#20262a';
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = '#e8ecef';
+  ctx.font = '600 13px system-ui';
+  ctx.fillText(title, 12, 20);
+  const left = 48, right = 12, top = 34, bottom = 28;
+  const prepared = lines.map(l => ({...l, data: transformSeries(l.data), dash: []}));
+  const bestLines = lines
+    .filter(l => l.best)
+    .map(l => ({
+      ...l,
+      name: `${l.name} best`,
+      data: rollingBestSeries(l.data, l.best),
+      dash: [5, 4],
+      width: 1.5,
+      alpha: 0.82,
+    }));
+  const allLines = prepared.concat(bestLines);
+  const pts = allLines.flatMap(l => l.data);
+  if (!pts.length) {
+    ctx.fillStyle = '#9aa8b2';
+    ctx.font = '12px system-ui';
+    ctx.fillText('No live history yet. Restart training after this patch for live metrics.', 12, 58);
+    return;
+  }
+  const xs = pts.map(p => p[0]), ys = pts.map(p => p[1]);
+  let xmin = Math.min(...xs), xmax = Math.max(...xs);
+  let ymin = Math.min(...ys), ymax = Math.max(...ys);
+  if (xmax === xmin) xmax = xmin + 1;
+  if (ymax === ymin) { ymax += 1; ymin -= 1; }
+  const pad = (ymax - ymin) * 0.08;
+  ymin -= pad; ymax += pad;
+  const xscale = x => left + (x - xmin) / (xmax - xmin) * (w - left - right);
+  const yscale = y => top + (1 - (y - ymin) / (ymax - ymin)) * (h - top - bottom);
+  ctx.strokeStyle = '#344047';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i < 4; i++) {
+    const y = top + i * (h - top - bottom) / 3;
+    ctx.moveTo(left, y); ctx.lineTo(w - right, y);
+  }
+  ctx.stroke();
+  ctx.fillStyle = '#9aa8b2';
+  ctx.font = '11px system-ui';
+  ctx.fillText(num(ymax), 6, top + 4);
+  ctx.fillText(num(ymin), 6, h - bottom);
+  for (const line of prepared) {
+    if (!line.data.length) continue;
+    ctx.setLineDash(line.dash || []);
+    ctx.globalAlpha = line.alpha || 1;
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = line.width || 2;
+    ctx.beginPath();
+    line.data.forEach((p, i) => {
+      const x = xscale(p[0]), y = yscale(p[1]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  for (const line of bestLines) {
+    if (!line.data.length) continue;
+    ctx.setLineDash(line.dash || []);
+    ctx.globalAlpha = line.alpha || 1;
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = line.width || 1.5;
+    ctx.beginPath();
+    line.data.forEach((p, i) => {
+      const x = xscale(p[0]), y = yscale(p[1]);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+  for (const line of prepared) {
+    if (!line.data.length) continue;
+    const last = line.data[line.data.length - 1];
+    ctx.fillStyle = line.color;
+    ctx.fillText(`${line.name}: ${num(last[1])}`, 12 + prepared.indexOf(line) * 150, h - 8);
+  }
+}
+
+function updateControls() {
+  document.getElementById('windowLabel').textContent = `${viewPct}%`;
+  document.getElementById('smoothLabel').textContent = String(smoothWindow);
+  document.getElementById('windowRange').value = viewPct;
+  document.getElementById('smoothRange').value = smoothWindow;
+}
+
+document.getElementById('zoomIn').addEventListener('click', () => {
+  viewPct = Math.max(5, Math.round(viewPct / 2));
+  updateControls();
+  refresh();
+});
+document.getElementById('zoomOut').addEventListener('click', () => {
+  viewPct = Math.min(100, Math.round(viewPct * 2));
+  updateControls();
+  refresh();
+});
+document.getElementById('zoomAll').addEventListener('click', () => {
+  viewPct = 100;
+  updateControls();
+  refresh();
+});
+document.getElementById('windowRange').addEventListener('input', event => {
+  viewPct = Number(event.target.value);
+  updateControls();
+  refresh();
+});
+document.getElementById('smoothRange').addEventListener('input', event => {
+  smoothWindow = Number(event.target.value);
+  updateControls();
+  refresh();
+});
+
+async function refresh() {
+  const res = await fetch('/api/state');
+  const data = await res.json();
+  const run = data.selected || {};
+  const live = run.live || {};
+  const latest = live.latest || run.latest_final || {};
+  const history = live.history || run.final_history || run.checkpoint_history || [];
+  const cfg = live.config || run.config || {};
+  const total = Number(cfg.total_timesteps || data.total_timesteps || 0);
+  const steps = Number(latest.agent_steps || run.latest_step || 0);
+  const sps = Number(latest.SPS || run.estimated_sps || 0);
+  document.getElementById('subtitle').textContent = `${data.env} | ${data.checkpoint_dir}`;
+  document.getElementById('updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  document.getElementById('run').textContent = short(run.run_id);
+  document.getElementById('stage').innerHTML = `<span class="${run.status_class || 'dead'}">${run.status || 'unknown'}</span>`;
+  document.getElementById('experimentName').textContent = cfg.experiment_name || 'Unnamed experiment';
+  document.getElementById('experimentDescription').textContent = cfg.experiment_description || 'No description recorded for this run.';
+  document.getElementById('steps').textContent = num(steps);
+  const phase = live.stage || run.status || '';
+  const over = total && steps > total;
+  document.getElementById('progress').textContent = total
+    ? `${pct(Math.min(steps / total, 1))} of ${num(total)}${over ? `, ${num(steps - total)} eval steps` : ''}`
+    : 'total unknown';
+  document.getElementById('sps').textContent = num(sps);
+  document.getElementById('eta').textContent = total && sps ? `${num((total - steps) / sps / 60)} min remaining` : 'ETA unavailable';
+  document.getElementById('success').textContent = pct(Number(latest['env/success_rate']));
+  document.getElementById('collision').textContent = pct(Number(latest['env/collision_rate']));
+  document.getElementById('score').textContent = num(Number(latest['env/score']));
+  document.getElementById('epLen').textContent = `episode length ${num(Number(latest['env/episode_length']))}`;
+  drawChart(document.getElementById('quality'), 'Success / Avoidance', [
+    {name:'success', color:'#42d392', data:series(history, 'env/success_rate'), best:'max'},
+    {name:'avoid', color:'#ff6b6b', data:seriesMap(history, 'env/collision_rate', v => 1 - v), best:'max'},
+  ]);
+  drawChart(document.getElementById('return'), 'Return', [
+    {name:'score', color:'#6ea8fe', data:series(history, 'env/score'), best:'max'},
+  ]);
+  drawChart(document.getElementById('loss'), 'Value Fit / Entropy', [
+    {name:'EV', color:'#f4bf50', data:series(history, 'loss/explained_variance'), best:'max'},
+    {name:'entropy', color:'#24d6d6', data:series(history, 'loss/entropy')},
+  ]);
+  drawChart(document.getElementById('speed'), 'Throughput', [
+    {name:'SPS', color:'#42d392', data:series(history, 'SPS'), best:'max'},
+  ]);
+  document.getElementById('runs').innerHTML = data.runs.map(r => `
+    <tr>
+      <td>${short(r.run_id)}</td>
+      <td><span class="pill ${r.status_class}">${r.status}</span></td>
+      <td>${num(r.latest_step)}</td>
+      <td>${r.checkpoint_count}</td>
+      <td>${r.updated_age_s == null ? '-' : `${num(r.updated_age_s)}s ago`}</td>
+      <td class="sub">${r.latest_checkpoint || r.log_path || ''}</td>
+    </tr>`).join('');
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

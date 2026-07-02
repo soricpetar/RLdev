@@ -93,12 +93,18 @@ class FieldNavEnv(gym.Env):
         walls_range: tuple[int, int] = (1, 4),
         curriculum_enabled: bool = False,
         curriculum_warmup_steps: int = 0,
+        curriculum_max_speed_start_mps: float = 0.0,
         min_goal_distance_m: float = 10.0,
         max_goal_distance_m: float = 22.0,
         goal_tolerance_m: float = 0.65,
         robot_radius_m: float = 0.35,
         inflation_radius_m: float = 1.0,
         near_obstacle_threshold_m: float = 2.0,
+        collision_penalty: float = 20.0,
+        near_obstacle_scale: float = 0.2,
+        speed_near_obstacle_scale: float = 0.0,
+        turn_speed_near_obstacle_scale: float = 0.0,
+        accel_near_obstacle_scale: float = 0.0,
         reset_start_clearance_m: float = 0.0,
         reset_goal_clearance_m: float = 0.0,
         reset_forward_clearance_m: float = 0.0,
@@ -142,6 +148,7 @@ class FieldNavEnv(gym.Env):
         self.walls_range = walls_range
         self.curriculum_enabled = curriculum_enabled
         self.curriculum_warmup_steps = curriculum_warmup_steps
+        self.curriculum_max_speed_start_mps = curriculum_max_speed_start_mps
         self._lifetime_steps = 0
         self.min_goal_distance_m = min_goal_distance_m
         self.max_goal_distance_m = max_goal_distance_m
@@ -149,13 +156,19 @@ class FieldNavEnv(gym.Env):
         self.robot_radius_m = robot_radius_m
         self.inflation_radius_m = inflation_radius_m
         self.near_obstacle_threshold_m = near_obstacle_threshold_m
+        self.speed_near_obstacle_scale = speed_near_obstacle_scale
+        self.turn_speed_near_obstacle_scale = turn_speed_near_obstacle_scale
+        self.accel_near_obstacle_scale = accel_near_obstacle_scale
         self.reset_start_clearance_m = reset_start_clearance_m
         self.reset_goal_clearance_m = reset_goal_clearance_m
         self.reset_forward_clearance_m = reset_forward_clearance_m
         self.reset_forward_margin_m = reset_forward_margin_m
         self.render_mode = render_mode
 
-        self.reward_cfg = RewardConfig()
+        self.reward_cfg = RewardConfig(
+            collision_penalty=collision_penalty,
+            near_obstacle_scale=near_obstacle_scale,
+        )
         self._prev_steering = 0.0
         self._steps = 0
 
@@ -280,6 +293,17 @@ class FieldNavEnv(gym.Env):
             steering_delta=steering - self._prev_steering,
             cfg=self.reward_cfg,
         )
+        if self.speed_control and self.speed_near_obstacle_scale > 0.0 and nearest_margin < self.near_obstacle_threshold_m:
+            obstacle_closeness = self.near_obstacle_threshold_m - nearest_margin
+            speed_fraction = speed / max(1e-6, self._curriculum_max_speed_mps())
+            reward -= self.speed_near_obstacle_scale * obstacle_closeness * speed_fraction
+        if self.speed_control and self.turn_speed_near_obstacle_scale > 0.0 and nearest_margin < self.near_obstacle_threshold_m:
+            obstacle_closeness = self.near_obstacle_threshold_m - nearest_margin
+            speed_fraction = speed / max(1e-6, self._curriculum_max_speed_mps())
+            reward -= self.turn_speed_near_obstacle_scale * obstacle_closeness * speed_fraction * abs(steering)
+        if self.speed_control and self.accel_near_obstacle_scale > 0.0 and throttle > 0.0 and nearest_margin < self.near_obstacle_threshold_m:
+            obstacle_closeness = self.near_obstacle_threshold_m - nearest_margin
+            reward -= self.accel_near_obstacle_scale * obstacle_closeness
         reward -= semantic_penalty
         reward += self._partial_observation_reward()
         self.object_contact = object_contact
@@ -318,7 +342,7 @@ class FieldNavEnv(gym.Env):
             speed -= self.brake_deceleration_mps2 * self.dt
         else:
             speed -= self.coast_deceleration_mps2 * self.dt
-        return float(np.clip(speed, self.min_speed_mps, self.max_speed_mps))
+        return float(np.clip(speed, self.min_speed_mps, self._curriculum_max_speed_mps()))
 
     def render(self):
         dist = self._goal_distance()
@@ -339,6 +363,15 @@ class FieldNavEnv(gym.Env):
         if not self.curriculum_enabled or self.curriculum_warmup_steps <= 0:
             return 1.0
         return float(np.clip(self._lifetime_steps / max(1, self.curriculum_warmup_steps), 0.0, 1.0))
+
+    def _curriculum_max_speed_mps(self) -> float:
+        if not self.curriculum_enabled or self.curriculum_max_speed_start_mps <= 0.0:
+            return self.max_speed_mps
+        return self._curriculum_float(
+            self._curriculum_progress(),
+            self.curriculum_max_speed_start_mps,
+            self.max_speed_mps,
+        )
 
     @staticmethod
     def _curriculum_float(progress: float, start: float, end: float) -> float:

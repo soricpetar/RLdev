@@ -69,6 +69,19 @@ void my_init(Env* env, Dict* kwargs) {
     env->speed_control = 1;
     env->curriculum_enabled = env_get_int(kwargs, "curriculum_enabled", 0);
     env->curriculum_warmup_steps = env_get_int(kwargs, "curriculum_warmup_steps", 0);
+    env->curriculum_tree_rows_start_min = env_get_int(kwargs, "curriculum_tree_rows_start_min", 1);
+    env->curriculum_tree_rows_start_max = env_get_int(kwargs, "curriculum_tree_rows_start_max", 2);
+    env->curriculum_bushes_start_min = env_get_int(kwargs, "curriculum_bushes_start_min", 3);
+    env->curriculum_bushes_start_max = env_get_int(kwargs, "curriculum_bushes_start_max", 8);
+    env->curriculum_potholes_start_min = env_get_int(kwargs, "curriculum_potholes_start_min", 1);
+    env->curriculum_potholes_start_max = env_get_int(kwargs, "curriculum_potholes_start_max", 4);
+    env->curriculum_people_start_min = env_get_int(kwargs, "curriculum_people_start_min", 0);
+    env->curriculum_people_start_max = env_get_int(kwargs, "curriculum_people_start_max", 2);
+    env->curriculum_walls_start_min = env_get_int(kwargs, "curriculum_walls_start_min", 0);
+    env->curriculum_walls_start_max = env_get_int(kwargs, "curriculum_walls_start_max", 1);
+    env->curriculum_min_goal_distance_start_m = env_get_float(kwargs, "curriculum_min_goal_distance_start_m", 6.0f);
+    env->curriculum_max_goal_distance_start_m = env_get_float(kwargs, "curriculum_max_goal_distance_start_m", 12.0f);
+    env->curriculum_blocked_corridor_start_prob = env_get_float(kwargs, "curriculum_blocked_corridor_start_prob", 0.0f);
     env->lifetime_steps = 0;
 }
 

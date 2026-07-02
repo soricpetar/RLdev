@@ -101,6 +101,19 @@ typedef struct FieldNav {
     int speed_control;
     int curriculum_enabled;
     int curriculum_warmup_steps;
+    int curriculum_tree_rows_start_min;
+    int curriculum_tree_rows_start_max;
+    int curriculum_bushes_start_min;
+    int curriculum_bushes_start_max;
+    int curriculum_potholes_start_min;
+    int curriculum_potholes_start_max;
+    int curriculum_people_start_min;
+    int curriculum_people_start_max;
+    int curriculum_walls_start_min;
+    int curriculum_walls_start_max;
+    float curriculum_min_goal_distance_start_m;
+    float curriculum_max_goal_distance_start_m;
+    float curriculum_blocked_corridor_start_prob;
     int lifetime_steps;
 
     float robot_x;
@@ -431,16 +444,16 @@ static inline void fn_sample_objects(FieldNav* env) {
     float span = env->world_size_m * 0.42f;
     env->object_count = 0;
     float progress = fn_curriculum_progress(env);
-    int tree_rows_min = fn_curriculum_int(progress, 1, env->tree_rows_min);
-    int tree_rows_max = fn_curriculum_int(progress, 2, env->tree_rows_max);
-    int bushes_min = fn_curriculum_int(progress, 3, env->bushes_min);
-    int bushes_max = fn_curriculum_int(progress, 8, env->bushes_max);
-    int potholes_min = fn_curriculum_int(progress, 1, env->potholes_min);
-    int potholes_max = fn_curriculum_int(progress, 4, env->potholes_max);
-    int people_min = fn_curriculum_int(progress, 0, env->people_min);
-    int people_max = fn_curriculum_int(progress, 2, env->people_max);
-    int walls_min = fn_curriculum_int(progress, 0, env->walls_min);
-    int walls_max = fn_curriculum_int(progress, 1, env->walls_max);
+    int tree_rows_min = fn_curriculum_int(progress, env->curriculum_tree_rows_start_min, env->tree_rows_min);
+    int tree_rows_max = fn_curriculum_int(progress, env->curriculum_tree_rows_start_max, env->tree_rows_max);
+    int bushes_min = fn_curriculum_int(progress, env->curriculum_bushes_start_min, env->bushes_min);
+    int bushes_max = fn_curriculum_int(progress, env->curriculum_bushes_start_max, env->bushes_max);
+    int potholes_min = fn_curriculum_int(progress, env->curriculum_potholes_start_min, env->potholes_min);
+    int potholes_max = fn_curriculum_int(progress, env->curriculum_potholes_start_max, env->potholes_max);
+    int people_min = fn_curriculum_int(progress, env->curriculum_people_start_min, env->people_min);
+    int people_max = fn_curriculum_int(progress, env->curriculum_people_start_max, env->people_max);
+    int walls_min = fn_curriculum_int(progress, env->curriculum_walls_start_min, env->walls_min);
+    int walls_max = fn_curriculum_int(progress, env->curriculum_walls_start_max, env->walls_max);
     if (tree_rows_max < tree_rows_min) tree_rows_max = tree_rows_min;
     if (bushes_max < bushes_min) bushes_max = bushes_min;
     if (potholes_max < potholes_min) potholes_max = potholes_min;
@@ -488,7 +501,16 @@ static inline void fn_sample_objects(FieldNav* env) {
         float dy = 0.5f * length * sinf(angle);
         fn_add_wall(env, cx - dx, cy - dy, cx + dx, cy + dy, fn_uniform(env, 0.25f, 0.55f));
     }
+    float blocked_corridor_prob = env->blocked_corridor_prob;
+    if (env->curriculum_enabled) {
+        env->blocked_corridor_prob = fn_curriculum_float(
+            progress,
+            env->curriculum_blocked_corridor_start_prob,
+            blocked_corridor_prob
+        );
+    }
     fn_add_blocked_corridor(env);
+    env->blocked_corridor_prob = blocked_corridor_prob;
 }
 
 static inline float fn_goal_distance(FieldNav* env) {
@@ -618,8 +640,16 @@ static inline void c_reset(FieldNav* env) {
     env->robot_y = fn_uniform(env, -3.0f, 3.0f);
     env->heading = fn_uniform(env, -FIELD_NAV_PI, FIELD_NAV_PI);
     float curriculum_progress = fn_curriculum_progress(env);
-    float min_goal_distance = fn_curriculum_float(curriculum_progress, 6.0f, env->min_goal_distance_m);
-    float max_goal_distance = fn_curriculum_float(curriculum_progress, 12.0f, env->max_goal_distance_m);
+    float min_goal_distance = fn_curriculum_float(
+        curriculum_progress,
+        env->curriculum_min_goal_distance_start_m,
+        env->min_goal_distance_m
+    );
+    float max_goal_distance = fn_curriculum_float(
+        curriculum_progress,
+        env->curriculum_max_goal_distance_start_m,
+        env->max_goal_distance_m
+    );
     if (max_goal_distance < min_goal_distance) max_goal_distance = min_goal_distance;
 
     int found = 0;

@@ -1251,3 +1251,75 @@ Interpretation:
 - Current default best remains Stage32 final. Stage31 remains the safest
   blocked-corridor checkpoint by zero collisions and slightly higher blocked
   success than Stage34.
+
+### Stage35 / CV2 - From-Scratch Improved Curriculum Attempt
+
+Implementation change:
+
+- Added explicit native curriculum-start knobs to
+  `ocean/field_nav_camera_native_hard/field_nav.h` and the hard/hard-speed
+  bindings:
+  - start obstacle ranges for trees, bushes, potholes, people, and walls
+  - start goal-distance range
+  - scheduled blocked-corridor probability
+- This fixes the old limitation where `curriculum_enabled = 1` still began
+  with non-trivial hazards (`1-2` tree rows, `3-8` bushes, `1-4` potholes),
+  which was too hard for a cold 15-action speed-control policy.
+- Rebuilt native backend:
+  `./build.sh field_nav_camera_native_hard_speed --float --cpu`
+
+CV2-001:
+
+- env: `field_nav_camera_native_hard_speed`
+- run id: `1779362521716`
+- setup:
+  - from scratch
+  - `50M` requested, stopped early at about `13.9M`
+  - LR `2e-4`, replay schedule `1.0 -> 2.0`
+  - old built-in curriculum start, `blocked_corridor_prob = 0.08`
+- dashboard URL during run: `http://100.120.184.115:8789`
+- reason stopped:
+  - entropy stayed uniform at about `2.707`
+  - success stayed around a few percent
+  - curriculum progress reached about `0.36`, meaning the task was ramping
+    while the policy had not learned the easy behavior
+
+CV2-002:
+
+- env: `field_nav_camera_native_hard_speed`
+- run id: `1779362764256`
+- setup:
+  - from scratch
+  - `50M` requested, stopped early at `12.53M`
+  - corrected sparse-start curriculum:
+    - start goals `3-7m`
+    - start trees `0-0`
+    - start bushes `0-1`
+    - start potholes/people/walls `0`
+    - blocked-corridor probability ramps from `0.0` to `0.08`
+    - full hard target remains the normal hard-speed distribution
+  - LR `5e-4`, replay ratio fixed at `2.0`, entropy coefficient `0.002`
+- dashboard URL during run: `http://100.120.184.115:8790`
+- latest checkpoint before stop:
+  `navigation/artifacts/front_camera_native_stage35_cv2_scratch_sparse_start_lr5e4_50m_checkpoints/field_nav_camera_native_hard_speed/1779362764256/0000000012337152.bin`
+
+| window | step | success | collision | score | curriculum | entropy | approx KL | SPS |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| stopped | `12,533,760` | `5.76%` | `20.14%` | `-30.87` | `0.326` | `2.704` | `0.00000003` | `85.8K` |
+
+Interpretation:
+
+- The improved curriculum implementation worked mechanically: CV2-002 started
+  from genuinely sparse/short-goal layouts and ramped toward hard.
+- It still did not produce a usable from-scratch speed-control policy. Entropy
+  remained near `ln(15)`, KL stayed effectively zero, and success was still
+  single-digit after `12.5M` steps.
+- This strengthens the earlier conclusion from Stages20-22: the blocker is not
+  only obstacle curriculum. The 15-action speed-control policy does not reliably
+  specialize from scratch under the current PPO/reward setup.
+- The next useful experiment should not be another from-scratch hard curriculum.
+  Use either:
+  - a shaped/supervised speed-control bootstrap on the empty short-goal task,
+    or
+  - the known Stage23 sparse-bootstrap checkpoint as the starting point, then
+    apply the new sparse-start curriculum toward full hard.

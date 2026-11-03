@@ -148,7 +148,12 @@ def class_map_from_masks(class_masks: Mapping[str, np.ndarray], shape: tuple[int
 
 
 class YoloSegmentationCostmap:
-    """Lazy Ultralytics wrapper that produces Stage49 costmaps from RGB frames."""
+    """Produce Stage49 costmaps from image paths or OpenCV BGR uint8 arrays.
+
+    NumPy images use HWC layout and BGR channel order, matching Ultralytics' input
+    contract. Ultralytics converts them to RGB model tensors; callers must not
+    swap channels first. Image paths are decoded by Ultralytics.
+    """
 
     def __init__(
         self,

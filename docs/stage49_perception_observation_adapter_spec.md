@@ -109,6 +109,11 @@ Inputs per frame:
 - current robot speed, yaw rate, previous steering command
 - goal bearing and distance from navigation layer, beacon, clicked target, GPS/SLAM, or operator-provided waypoint
 
+For `YoloSegmentationCostmap`, an in-memory NumPy image must be an OpenCV-style
+HWC `uint8` **BGR** array. Ultralytics converts that array to RGB for the model;
+do not pre-convert it. Image-path inputs are decoded internally. RGB arrays used
+by debug visualization remain RGB and are a separate interface.
+
 Processing:
 
 1. Align RGB, depth, and segmentation in the same image coordinate frame.
